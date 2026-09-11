@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+data/objects/*
+!data/objects/.gitkeep
+.pytest_cache/
+*.egg-info/
+.DS_Store
+.run/

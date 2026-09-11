@@ -1,0 +1,44 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+sqlalchemy==2.0.35
+alembic==1.13.3
+psycopg2-binary==2.9.9
+redis==5.0.8
+rq==1.16.2
+pydantic==2.9.2
+pydantic-settings==2.5.2
+python-multipart==0.0.9
+python-dotenv==1.0.1
+boto3==1.35.24
+structlog==24.4.0
+PyJWT==2.9.0
+cryptography==43.0.1  # symmetric encryption for creator_accounts.access_token_encrypted -- see app/core/crypto.py
+faster-whisper==1.0.3
+openai==1.51.2
+requests==2.34.2  # direct import: app/core/tiktok_client.py's HTTP calls; also faster-whisper's model downloader needs it
+# Pinned explicitly (not just left to scenedetect[opencv]'s unpinned
+# "opencv-python" dependency) because opencv-python 5.x removed the legacy
+# Haar cascade objdetect API (cv2.CascadeClassifier, cv2.data.haarcascades)
+# that app/core/face_detect.py needs -- this version still has it. Same
+# package name satisfies scenedetect's own requirement too, so this doesn't
+# add a second opencv install.
+opencv-python==4.10.0.84
+scenedetect[opencv]==0.6.4
+
+# --- Audio-event detection (app/core/audio_events.py), opt-in via
+# ENABLE_AUDIO_EVENT_SCORING -- off by default. torch is a genuinely heavy
+# new dependency class for this project (~700MB-2GB depending on platform
+# wheel, previously the heaviest dependency was faster-whisper's CTranslate2
+# runtime with no torch/tensorflow at all). On a CPU-only Windows dev
+# machine, install the much smaller CPU-only wheel instead of what a plain
+# `pip install -r requirements.txt` pulls from PyPI's default index:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+# then `pip install -r requirements.txt` again to pick up panns-inference
+# without torch re-resolving to the CUDA build.
+torch==2.5.1
+panns-inference==0.1.1
+numpy==1.26.4  # already a transitive dep of opencv/scenedetect; pinned explicitly since audio_events.py imports it directly
+
+# dev / test
+pytest==8.3.3
+httpx==0.27.2

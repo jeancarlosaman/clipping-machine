@@ -1,0 +1,47 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Virtualenvs (never commit; recreate from requirements.txt) ---
+venv/
+.venv/
+env/
+
+# --- Secrets: real credentials live here, .env.example is the template ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Media + generated artifacts (large, regenerable) ---
+backend/data/objects/
+!backend/data/objects/.gitkeep
+*.mp4
+*.mkv
+*.mov
+*.webm
+*.wav
+*.mp3
+*.m4a
+
+# --- Launcher runtime state (PIDs of the processes start.ps1 spawned) ---
+.run/
+
+# --- Scratch / staging that is not part of the project ---
+_to_delete/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Stale duplicate of an earlier scaffold copy (200K, superseded by backend/).
+# Left on disk rather than deleted -- remove it yourself when you are sure.
+/clipping-machine/

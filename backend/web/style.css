@@ -1,0 +1,363 @@
+:root {
+  --bg: #0f1115;
+  --panel: #161922;
+  --border: #2a2f3a;
+  --text: #e6e8eb;
+  --muted: #8a8f99;
+  --accent: #5b8def;
+  --ok: #3fbf76;
+  --warn: #e0a83e;
+  --err: #e05a5a;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  padding: 0 1.5rem 3rem;
+  max-width: 960px;
+  margin-inline: auto;
+}
+
+header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 1.5rem 0 1rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 1.5rem;
+}
+
+h1 { font-size: 1.25rem; margin: 0; font-weight: 600; }
+h2 { font-size: 1rem; margin: 0 0 0.75rem; }
+h3 { font-size: 0.9rem; margin: 1rem 0 0.5rem; color: var(--muted); }
+
+.muted { color: var(--muted); font-size: 0.85rem; }
+.mono { font-family: "SF Mono", Consolas, monospace; font-size: 0.85rem; }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1.25rem;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+
+input[type="text"], input[type="file"] {
+  background: #0d0f14;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.45rem 0.6rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  flex: 1;
+  min-width: 200px;
+}
+
+input[type="number"], select {
+  background: #0d0f14;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.4rem 0.5rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+#upload-options, #add-account-form {
+  margin-top: 0.6rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.6rem;
+}
+#upload-options summary, #add-account-form summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 0.6rem;
+}
+#upload-options .opt-hint, #add-account-form .opt-hint { margin: 0.2rem 0 0.6rem; }
+
+button {
+  background: var(--accent);
+  color: white;
+  border: none;
+  padding: 0.5rem 0.9rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+button:hover { filter: brightness(1.1); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+button.secondary { background: #2a2f3a; }
+button.danger { background: var(--err); }
+
+.rating-row { align-items: center; }
+button.star-btn {
+  background: transparent;
+  color: #e8b84b;
+  border: none;
+  padding: 0 0.05rem;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+button.star-btn:hover { filter: brightness(1.3); }
+.rating-clear-link { color: var(--muted); }
+
+/* Free-text reviewer comment, saved with whichever decision button is
+   pressed. Deliberately full-width and always visible rather than hidden
+   behind an "add comment" toggle -- these comments are the input to the
+   LLM segment proposer's few-shot examples, so the friction of writing
+   one should be as close to zero as possible. */
+textarea.review-notes-input {
+  background: #0d0f14;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.45rem 0.6rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-family: inherit;
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+}
+textarea.review-notes-input::placeholder { color: var(--muted); }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  margin-top: 0.5rem;
+}
+th, td {
+  text-align: left;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+th { color: var(--muted); font-weight: 500; }
+tr:hover td { background: rgba(255,255,255,0.02); }
+tr.selectable { cursor: pointer; }
+
+.pill {
+  display: inline-block;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.pill-unknown { background: #2a2f3a; color: var(--muted); }
+.pill-ok { background: rgba(63,191,118,0.15); color: var(--ok); }
+.pill-warn { background: rgba(224,168,62,0.15); color: var(--warn); }
+.pill-err { background: rgba(224,90,90,0.15); color: var(--err); }
+
+.json-block {
+  background: #0d0f14;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem;
+  font-size: 0.78rem;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.clip-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem;
+  margin-bottom: 0.6rem;
+}
+.clip-card .row { margin-bottom: 0.3rem; }
+.clip-preview { margin: 0.5rem 0; min-height: 0; }
+.clip-preview:empty { display: none; }
+
+.muted.small { font-size: 0.78rem; margin-top: 0.2rem; }
+
+.clip-title-row { display: flex; align-items: center; gap: 0.5rem; margin: 0.35rem 0; }
+.clip-title { font-weight: 700; font-size: 1rem; line-height: 1.25; }
+.title-edit-form { display: flex; gap: 0.4rem; margin: 0.35rem 0; align-items: center; }
+.title-edit-input { flex: 1; min-width: 0; }
+
+.hashtags-row { display: flex; align-items: center; gap: 0.4rem; margin-top: 0.3rem; }
+.hashtags { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.hashtag {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(90,140,255,0.12);
+  color: var(--accent, #5a8cff);
+  font-size: 0.75rem;
+}
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 0.75rem;
+  cursor: pointer;
+  padding: 0;
+}
+.link-btn:hover { color: var(--accent, #5a8cff); }
+.hashtag-edit-form { display: flex; gap: 0.4rem; margin-top: 0.3rem; align-items: center; }
+.hashtag-edit-input { flex: 1; min-width: 0; }
+
+.toast {
+  position: fixed;
+  bottom: 1.25rem;
+  right: 1.25rem;
+  background: var(--err);
+  color: white;
+  padding: 0.6rem 1rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  max-width: 420px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+}
+
+footer {
+  border-top: 1px solid var(--border);
+  padding-top: 1rem;
+  margin-top: 2rem;
+}
+
+/* ---- clip preview + TikTok safe-zone overlay ---- */
+/* The overlay exists because this preview shows the RAW clip, while TikTok
+   draws its own UI on top in the feed. A caption that looks fine here can
+   sit underneath the platform's own caption text -- which is exactly how
+   the burned-in caption band drifted into TikTok's bottom UI over three
+   "move it lower" iterations before anyone could see the collision. */
+.clip-preview {
+  display: inline-block;
+}
+
+.clip-preview-stage {
+  position: relative;
+  display: inline-block;
+  line-height: 0; /* kills the descender gap under the video box */
+}
+
+.clip-preview-stage video {
+  max-width: 320px;
+  border-radius: 8px;
+  display: block;
+}
+
+.safe-zones {
+  position: absolute;
+  inset: 0;
+  pointer-events: none; /* never steal clicks from the video controls */
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.safe-zone {
+  position: absolute;
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(255, 64, 96, 0.30) 0 6px,
+    rgba(255, 64, 96, 0.14) 6px 12px
+  );
+  outline: 1px solid rgba(255, 64, 96, 0.55);
+  outline-offset: -1px;
+}
+
+.safe-zone-top    { top: 0; left: 0; right: 0; }
+.safe-zone-bottom { bottom: 0; left: 0; right: 0; }
+.safe-zone-left   { top: 0; bottom: 0; left: 0; }
+.safe-zone-right  { top: 0; bottom: 0; right: 0; }
+
+.safe-zone-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 0.85rem;
+  line-height: 1.2;
+  cursor: pointer;
+  user-select: none;
+}
+
+.safe-zone-toggle input {
+  cursor: pointer;
+}
+
+.safe-zone-toggle span {
+  cursor: help;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.7rem;
+}
+
+/* ---- facecam marker ---- */
+/* Replaces "guess where the facecam is" with "the creator points at it".
+   Coordinates are normalized against the displayed image, so the box stays
+   correct regardless of how the frame is scaled for display. */
+.facecam-marker {
+  margin: 12px 0 18px;
+  padding: 10px 12px;
+  border: 1px solid rgba(127, 127, 127, 0.3);
+  border-radius: 8px;
+}
+
+.facecam-marker summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.facecam-controls {
+  align-items: flex-end;
+  gap: 10px;
+  margin: 10px 0;
+}
+
+.facecam-stage {
+  margin-top: 8px;
+}
+
+.facecam-canvas {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+  touch-action: none; /* pointer drags must not scroll the page on touch */
+  cursor: crosshair;
+  user-select: none;
+}
+
+.facecam-canvas img {
+  max-width: 100%;
+  width: 640px;
+  border-radius: 6px;
+  display: block;
+  -webkit-user-drag: none;
+  user-select: none;
+}
+
+.facecam-box {
+  position: absolute;
+  border: 2px solid #4ade80;
+  background: rgba(74, 222, 128, 0.16);
+  border-radius: 2px;
+  pointer-events: none; /* never swallow the drag it is drawn by */
+}

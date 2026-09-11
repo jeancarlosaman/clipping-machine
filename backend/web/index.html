@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Clipping Machine — Dev Console</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <h1>Clipping Machine <span class="muted">dev console</span></h1>
+    <div id="conn-status" class="pill pill-unknown">checking API…</div>
+  </header>
+
+  <section class="panel" id="token-panel">
+    <h2>1. Authenticate</h2>
+    <p class="muted">
+      No login flow exists yet — mint a dev token from a terminal in the repo:
+      <code>python scripts/create_dev_user.py you@example.com</code>, then paste it below.
+      It's saved in this browser only (localStorage), never sent anywhere but this API.
+    </p>
+    <div class="row">
+      <input id="token-input" type="text" placeholder="Bearer token" autocomplete="off" />
+      <button id="token-save">Save token</button>
+      <span id="token-status" class="muted"></span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>2. Submit a VOD</h2>
+    <div class="row">
+      <input id="file-input" type="file" accept=".mp4,.mov,.mkv,.webm" />
+      <button id="upload-btn">Upload &amp; start pipeline</button>
+    </div>
+    <details id="upload-options">
+      <summary>Options (model, clip count, length, score bar)</summary>
+      <div class="row">
+        <label>
+          Transcription model
+          <select id="opt-stt-model">
+            <option value="">(default -- base)</option>
+            <option value="tiny">tiny -- fastest, lower accuracy</option>
+            <option value="base">base -- balanced (project default)</option>
+            <option value="small">small -- slower, more accurate</option>
+            <option value="medium">medium -- slower still, more accurate</option>
+            <option value="large-v3">large-v3 -- slowest, most accurate</option>
+          </select>
+        </label>
+      </div>
+      <p class="muted opt-hint">
+        Longer videos on slower/CPU-only machines: pick <code>tiny</code> to cut transcription time
+        substantially at some accuracy cost. Short videos, or accuracy matters most: <code>small</code>
+        or up. See README's "Job timeouts" section for how this trades off against processing time.
+      </p>
+      <div class="row">
+        <label>Max clips <input id="opt-max-clips" type="number" min="1" max="20" placeholder="10" style="width:5rem" /></label>
+        <label>Min score (0-10) <input id="opt-min-score" type="number" min="0" max="10" step="0.5" placeholder="0" style="width:5rem" /></label>
+        <label>Min clip length (s) <input id="opt-min-clip-len" type="number" min="5" placeholder="15" style="width:5rem" /></label>
+        <label>Max clip length (s) <input id="opt-max-clip-len" type="number" max="180" placeholder="90" style="width:5rem" /></label>
+      </div>
+      <p class="muted opt-hint">
+        Leave any field blank to use the project default. "Min score" filters out low-scoring
+        candidates even if fewer than "Max clips" clear the bar -- see the score shown on each clip below.
+      </p>
+      <div class="row">
+        <label>
+          Camera layout
+          <select id="opt-camera-layout">
+            <option value="">Auto -- guess per clip</option>
+            <option value="single_crop">IRL / just chatting / webcam -- the person IS the shot</option>
+            <option value="split_reaction">Gameplay or screen + facecam -- split, cam on top</option>
+            <option value="fit_frame">Gameplay, screen share, or anything wide -- show the whole frame</option>
+          </select>
+        </label>
+        <label>
+          Crop side
+          <select id="opt-crop-bias">
+            <option value="">Auto (center, or follow a detected face)</option>
+            <option value="left">Favour the left of the frame</option>
+            <option value="center">Always dead center (ignore faces)</option>
+            <option value="right">Favour the right of the frame</option>
+          </select>
+        </label>
+      </div>
+      <p class="muted opt-hint">
+        Pick what the VOD actually looks like -- this is the single biggest lever on whether a clip
+        frames the right thing.
+        <br><b>IRL / just chatting / webcam</b>: one crop that follows the person. Use whenever the
+        speaker is the subject.
+        <br><b>Gameplay or screen + facecam</b>: splits the clip -- a zoom on the webcam box on top,
+        the gameplay below. Only use when there really is a small webcam overlay.
+        <br><b>Show the whole frame</b>: crops nothing; the full 16:9 picture is scaled to fit the
+        width over a blurred background. Best for gameplay/screen share where a vertical crop cuts
+        away the part that matters. Trade-off: a smaller picture.
+        <br><b>Auto</b> guesses per clip from a detected face's size and position. It was previously
+        far too eager to split (it treated 96% of face positions as "a corner webcam"); that was
+        fixed on 2026-09-11, but an explicit choice still beats a guess when you know the VOD.
+        <br>"Crop side" only applies to the layouts that crop, and overrides face-following when set --
+        useful when the important content consistently sits on one side of your layout.
+      </p>
+    </details>
+    <div id="upload-status" class="muted"></div>
+  </section>
+
+  <section class="panel">
+    <h2>3. Jobs <span id="jobs-count" class="muted"></span></h2>
+    <div class="row">
+      <button id="refresh-jobs-btn">Refresh now</button>
+      <label class="muted"><input type="checkbox" id="auto-refresh" checked /> auto-refresh every 3s</label>
+    </div>
+    <table id="jobs-table">
+      <thead>
+        <tr>
+          <th>Created</th>
+          <th>Status</th>
+          <th>Duration</th>
+          <th>Retries</th>
+          <th>Last error</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="jobs-body"></tbody>
+    </table>
+  </section>
+
+  <section class="panel" id="job-detail-panel" hidden>
+    <h2>Job detail: <span id="detail-job-id" class="mono"></span></h2>
+    <pre id="detail-job-json" class="json-block"></pre>
+
+    <details id="facecam-marker" class="facecam-marker">
+      <summary>Mark the facecam (skip guessing where it is)</summary>
+      <p class="muted">
+        Drag a box around the facecam on the frame below. Once marked, rendering uses exactly that
+        box for the split layout -- no face detection, no guessing, no clips split on a VOD that has
+        no facecam. Applies to the <b>next</b> render of this job, so mark it while transcription and
+        segmentation are still running and the first render will already use it.
+      </p>
+      <div class="row facecam-controls">
+        <label>
+          Frame at (seconds)
+          <input type="number" id="facecam-at" value="0" min="0" step="1" />
+        </label>
+        <button type="button" id="facecam-load" class="secondary">Load frame</button>
+        <button type="button" id="facecam-save" disabled>Save box</button>
+        <button type="button" id="facecam-clear" class="secondary">Clear mark</button>
+      </div>
+      <div id="facecam-stage" class="facecam-stage"></div>
+      <div id="facecam-status" class="muted"></div>
+    </details>
+
+    <h3>Clips</h3>
+    <p class="muted" id="clips-empty-note"></p>
+    <div id="clips-list"></div>
+  </section>
+
+  <section class="panel">
+    <h2>4. Creator accounts</h2>
+    <p class="muted">
+      Real TikTok OAuth is wired up below — needs a registered TikTok developer app
+      (Content Posting API product, Direct Post enabled) with <code>TIKTOK_CLIENT_KEY</code>,
+      <code>TIKTOK_CLIENT_SECRET</code>, and <code>TIKTOK_REDIRECT_URI</code> set (see README).
+      YouTube/Instagram don't have OAuth here yet — for those, or to register a token from
+      TikTok's own sandbox tooling without the consent-screen round trip, use the manual form
+      below instead.
+    </p>
+    <div class="row">
+      <button id="connect-tiktok-btn">Connect TikTok account</button>
+      <span class="muted small" id="connect-tiktok-hint"></span>
+    </div>
+    <details id="add-account-form">
+      <summary>Add a creator account</summary>
+      <div class="row">
+        <label>
+          Platform
+          <select id="acct-platform">
+            <option value="tiktok">tiktok</option>
+            <option value="youtube">youtube</option>
+            <option value="instagram">instagram</option>
+          </select>
+        </label>
+        <label>External account id <input id="acct-external-id" type="text" placeholder="@handle or account id" /></label>
+      </div>
+      <div class="row">
+        <label>Access token <input id="acct-access-token" type="text" placeholder="paste token" /></label>
+        <label>Refresh token (optional) <input id="acct-refresh-token" type="text" placeholder="paste token" /></label>
+        <label>Daily upload cap <input id="acct-daily-cap" type="number" min="1" max="10" placeholder="3" style="width:5rem" /></label>
+      </div>
+      <div class="row">
+        <button id="add-account-btn">Add account</button>
+      </div>
+      <p class="muted opt-hint">
+        Tokens are only sent to this API and encrypted before storage (see <code>app/core/crypto.py</code>) —
+        never displayed again once saved. This local dev console is not a substitute for a real
+        OAuth flow in production.
+      </p>
+    </details>
+    <div class="row">
+      <button id="refresh-accounts-btn">Refresh</button>
+    </div>
+    <table id="accounts-table">
+      <thead>
+        <tr><th>Platform</th><th>External account id</th><th>Daily cap</th><th>Id</th></tr>
+      </thead>
+      <tbody id="accounts-body"></tbody>
+    </table>
+  </section>
+
+  <footer class="muted">
+    Talks to <code id="api-base-display"></code>. Errors from the API are shown as returned — see
+    <code>app/api/errors.py</code> for the response envelope.
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>
