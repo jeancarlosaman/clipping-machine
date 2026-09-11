@@ -127,13 +127,16 @@
     <h2>Job detail: <span id="detail-job-id" class="mono"></span></h2>
     <pre id="detail-job-json" class="json-block"></pre>
 
-    <details id="facecam-marker" class="facecam-marker">
-      <summary>Mark the facecam (skip guessing where it is)</summary>
+    <div id="facecam-marker" class="facecam-marker">
+      <h3 style="margin-top:0">Framing — mark what matters</h3>
       <p class="muted">
-        Drag a box around the facecam on the frame below. Once marked, rendering uses exactly that
-        box for the split layout -- no face detection, no guessing, no clips split on a VOD that has
-        no facecam. Applies to the <b>next</b> render of this job, so mark it while transcription and
-        segmentation are still running and the first render will already use it.
+        Drag boxes on a real frame of this VOD instead of letting detection guess. The
+        <b style="color:#4ade80">facecam</b> box becomes the top panel of the split layout; the
+        <b style="color:#60a5fa">gameplay</b> box becomes the bottom panel — or, if you are not
+        splitting, the exact region the vertical crop is taken from. Marking either one switches
+        off the guessing for it.
+        <br>Applies to the <b>next</b> render, so mark it while transcription and segmentation are
+        still running and the first render already uses it.
       </p>
       <div class="row facecam-controls">
         <label>
@@ -141,12 +144,19 @@
           <input type="number" id="facecam-at" value="0" min="0" step="1" />
         </label>
         <button type="button" id="facecam-load" class="secondary">Load frame</button>
-        <button type="button" id="facecam-save" disabled>Save box</button>
-        <button type="button" id="facecam-clear" class="secondary">Clear mark</button>
+      </div>
+      <div class="row facecam-modes">
+        <span class="muted">Now marking:</span>
+        <button type="button" class="mode-btn active" data-mode="facecam" id="mode-facecam">Facecam</button>
+        <button type="button" class="mode-btn" data-mode="gameplay" id="mode-gameplay">Gameplay / content</button>
       </div>
       <div id="facecam-stage" class="facecam-stage"></div>
+      <div class="row facecam-controls">
+        <button type="button" id="facecam-save" disabled>Save boxes</button>
+        <button type="button" id="facecam-clear" class="secondary">Clear both</button>
+      </div>
       <div id="facecam-status" class="muted"></div>
-    </details>
+    </div>
 
     <h3>Clips</h3>
     <p class="muted" id="clips-empty-note"></p>

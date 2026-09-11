@@ -204,26 +204,59 @@ async function selectJob(jobId) {
   await loadJobs(); // re-render to highlight selection
 }
 
-// ---- facecam marker ----
+// ---- layout region marker (facecam + gameplay) ----
 //
-// Face detection answering "is there a facecam, and where" is what produced
-// the bad framing this exists to replace: it split clips on VODs with no
-// facecam at all, and missed real ones. A creator looking at a frame of
-// their own VOD is the one input that cannot be wrong, so when a box is
-// marked here it overrides detection entirely (see StreamJob.facecam_rect
-// and app/workers/rendering.py's layout decision).
+// Face detection had to answer "is there a facecam, and where" -- and a
+// centered crop had to guess which third of a 16:9 frame mattered. Both
+// guesses were the source of the bad framing this replaces. A creator
+// drawing boxes on a frame of their own VOD is the one input that cannot be
+// wrong, so a marked region overrides detection, classify_reaction_layout
+// and crop_bias for that panel (see app/workers/rendering.py).
 //
-// Coordinates are sent NORMALIZED (0..1 fractions of the frame), computed
-// against the image's own displayed size -- so the browser never needs to
-// know the source resolution and the mark stays correct if the same box is
-// later applied to a different-resolution source.
-let facecamDraft = null; // {x,y,w,h} normalized, pending save
+// Coordinates are NORMALIZED (0..1 of the frame) against the image's own
+// displayed size, so the browser never needs to know the source resolution
+// and a mark stays correct at any resolution.
+const REGION_COLORS = { facecam: "#4ade80", gameplay: "#60a5fa" };
+let markerMode = "facecam";
+let markedRegions = { facecam: null, gameplay: null }; // normalized, pending save
 
 function facecamSetStatus(message, isError = false) {
   const el = $("#facecam-status");
   if (!el) return;
   el.textContent = message;
-  el.style.color = isError ? "var(--danger, #d66)" : "";
+  el.style.color = isError ? "#f88" : "";
+}
+
+function renderMarkedBoxes() {
+  const canvas = $("#facecam-stage").querySelector(".facecam-canvas");
+  if (!canvas) return;
+  canvas.querySelectorAll(".facecam-box.saved").forEach((el) => el.remove());
+  const r = canvas.getBoundingClientRect();
+  for (const [name, rect] of Object.entries(markedRegions)) {
+    if (!rect) continue;
+    const el = document.createElement("div");
+    el.className = "facecam-box saved";
+    el.style.borderColor = REGION_COLORS[name];
+    el.style.background = `${REGION_COLORS[name]}22`;
+    el.style.left = `${rect.x * r.width}px`;
+    el.style.top = `${rect.y * r.height}px`;
+    el.style.width = `${rect.w * r.width}px`;
+    el.style.height = `${rect.h * r.height}px`;
+    const tag = document.createElement("span");
+    tag.className = "facecam-box-tag";
+    tag.style.background = REGION_COLORS[name];
+    tag.textContent = name;
+    el.appendChild(tag);
+    canvas.appendChild(el);
+  }
+}
+
+function describeMarks() {
+  const bits = [];
+  for (const [name, rect] of Object.entries(markedRegions)) {
+    if (rect) bits.push(`${name} ${(rect.w * 100).toFixed(0)}%x${(rect.h * 100).toFixed(0)}%`);
+  }
+  return bits.length ? bits.join("  |  ") : "nothing marked yet";
 }
 
 async function loadFacecamFrame() {
@@ -231,8 +264,6 @@ async function loadFacecamFrame() {
   const stage = $("#facecam-stage");
   const at = Number($("#facecam-at").value || 0);
   stage.innerHTML = `<div class="muted">Loading frame…</div>`;
-  facecamDraft = null;
-  $("#facecam-save").disabled = true;
 
   let url;
   try {
@@ -240,7 +271,7 @@ async function loadFacecamFrame() {
   } catch (err) {
     stage.innerHTML = "";
     facecamSetStatus(
-      `Could not load a frame at ${at}s (${err.message}). If the job is still uploading or that ` +
+      `Could not load a frame at ${at}s (${err.message}). If the upload never finished, or that ` +
       `timestamp is past the end of the video, try 0.`,
       true,
     );
@@ -259,8 +290,8 @@ async function loadFacecamFrame() {
   let originX = 0;
   let originY = 0;
 
-  // Rect is read per-drag rather than cached: the image can reflow (window
-  // resize, the <details> being reopened) between drags.
+  // Read the rect per drag rather than caching it: the image reflows on
+  // window resize and when the panel is re-rendered.
   const relative = (event) => {
     const r = canvas.getBoundingClientRect();
     return {
@@ -273,6 +304,8 @@ async function loadFacecamFrame() {
 
   const paint = (x, y, w, h) => {
     box.hidden = false;
+    box.style.borderColor = REGION_COLORS[markerMode];
+    box.style.background = `${REGION_COLORS[markerMode]}22`;
     box.style.left = `${x}px`;
     box.style.top = `${y}px`;
     box.style.width = `${w}px`;
@@ -280,6 +313,7 @@ async function loadFacecamFrame() {
   };
 
   canvas.addEventListener("pointerdown", (e) => {
+    if (e.target.classList.contains("facecam-box-tag")) return;
     const p = relative(e);
     dragging = true;
     originX = p.x;
@@ -303,41 +337,37 @@ async function loadFacecamFrame() {
     const y = Math.min(originY, p.y);
     const w = Math.abs(p.x - originX);
     const h = Math.abs(p.y - originY);
-    // A stray click is a 0-size box, not an instruction -- ignore it rather
-    // than saving something that would fail validation server-side.
+    box.hidden = true;
+    // A stray click is a 0-size box, not an instruction.
     if (w < 8 || h < 8) {
-      box.hidden = true;
-      facecamDraft = null;
-      $("#facecam-save").disabled = true;
-      facecamSetStatus("Drag a box around the facecam (that one was too small to count).");
+      facecamSetStatus(`That box was too small to count. Drag a box around the ${markerMode}.`);
       return;
     }
-    facecamDraft = { x: x / p.w, y: y / p.h, w: w / p.w, h: h / p.h };
+    markedRegions[markerMode] = { x: x / p.w, y: y / p.h, w: w / p.w, h: h / p.h };
     $("#facecam-save").disabled = false;
-    facecamSetStatus(
-      `Box: ${(facecamDraft.w * 100).toFixed(1)}% x ${(facecamDraft.h * 100).toFixed(1)}% of the frame. ` +
-      `Press "Save box" to use it.`,
-    );
+    renderMarkedBoxes();
+    facecamSetStatus(`${describeMarks()} — press "Save boxes" to apply.`);
   };
 
   canvas.addEventListener("pointerup", finishDrag);
   canvas.addEventListener("pointercancel", finishDrag);
 
-  facecamSetStatus("Drag a box around the facecam.");
+  renderMarkedBoxes();
+  facecamSetStatus(`Drag a box around the ${markerMode}. ${describeMarks()}`);
 }
 
-async function saveFacecamRect(rect) {
+async function saveLayoutRegions(regions) {
   if (!selectedJobId) return;
   try {
-    await apiFetch(`/api/v1/stream-jobs/${selectedJobId}/facecam-rect`, {
+    await apiFetch(`/api/v1/stream-jobs/${selectedJobId}/layout-regions`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rect }),
+      body: JSON.stringify(regions),
     });
     facecamSetStatus(
-      rect
-        ? "Saved. The next render of this job's clips will use this box (already-rendered clips keep their framing)."
-        : "Mark cleared -- this job is back to automatic face detection.",
+      regions.facecam || regions.gameplay
+        ? "Saved. The next render of this job's clips uses these boxes (already-rendered clips keep their framing)."
+        : "Cleared — this job is back to automatic detection.",
     );
     await loadJobDetail();
   } catch {
@@ -345,18 +375,35 @@ async function saveFacecamRect(rect) {
   }
 }
 
+function setMarkerMode(mode) {
+  markerMode = mode;
+  ["facecam", "gameplay"].forEach((m) => {
+    const btn = $(`#mode-${m}`);
+    if (btn) btn.classList.toggle("active", m === mode);
+  });
+  facecamSetStatus(`Drag a box around the ${mode}. ${describeMarks()}`);
+}
+
 function initFacecamMarker() {
-  $("#facecam-load").addEventListener("click", loadFacecamFrame);
-  $("#facecam-save").addEventListener("click", () => {
-    if (facecamDraft) saveFacecamRect(facecamDraft);
-  });
+  // Defensive: if index.html is a stale cached copy without this panel,
+  // these lookups return null and an unguarded addEventListener would throw
+  // during startup -- taking the REST of the console's init down with it.
+  const loadBtn = $("#facecam-load");
+  if (!loadBtn) {
+    console.warn("[clipping-machine] framing panel markup missing -- hard-refresh the page (Ctrl+Shift+R)");
+    return;
+  }
+  loadBtn.addEventListener("click", loadFacecamFrame);
+  $("#mode-facecam").addEventListener("click", () => setMarkerMode("facecam"));
+  $("#mode-gameplay").addEventListener("click", () => setMarkerMode("gameplay"));
+  $("#facecam-save").addEventListener("click", () => saveLayoutRegions(markedRegions));
   $("#facecam-clear").addEventListener("click", () => {
-    facecamDraft = null;
+    markedRegions = { facecam: null, gameplay: null };
     $("#facecam-save").disabled = true;
-    const box = $("#facecam-box");
-    if (box) box.hidden = true;
-    saveFacecamRect(null);
+    renderMarkedBoxes();
+    saveLayoutRegions({ facecam: null, gameplay: null });
   });
+  window.addEventListener("resize", renderMarkedBoxes);
 }
 
 async function loadJobDetail() {
@@ -370,13 +417,12 @@ async function loadJobDetail() {
   $("#detail-job-id").textContent = job.id;
   $("#detail-job-json").textContent = JSON.stringify(job, null, 2);
 
-  const marker = $("#facecam-marker");
-  if (marker) {
-    const r = job.facecam_rect;
-    marker.querySelector("summary").textContent = r
-      ? `Facecam marked (${(r.w * 100).toFixed(0)}% x ${(r.h * 100).toFixed(0)}% of the frame) -- click to change`
-      : "Mark the facecam (skip guessing where it is)";
-  }
+  // Seed the picker from whatever this job already has stored, so reopening
+  // a job shows its marks instead of a blank slate.
+  markedRegions = { facecam: job.facecam_rect || null, gameplay: job.gameplay_rect || null };
+  const saveBtn = $("#facecam-save");
+  if (saveBtn) saveBtn.disabled = !(markedRegions.facecam || markedRegions.gameplay);
+  renderMarkedBoxes();
 
   let clips = [];
   try {

@@ -74,11 +74,25 @@ git add -A
 if ($LASTEXITCODE -ne 0) { Write-Bad "git add failed."; exit 1 }
 
 $staged = @(git diff --cached --name-only)
+
+# "Nothing staged" is NOT a reason to stop: the usual way to get here is a
+# previous run that committed fine but could not reach GitHub (gh missing or
+# not logged in). Exiting here would mean re-running the script after
+# installing gh does nothing at all, which is precisely the case this script
+# most needs to handle.
+$hasCommits = $false
+git rev-parse --verify HEAD *> $null
+if ($LASTEXITCODE -eq 0) { $hasCommits = $true }
+
 if ($staged.Count -eq 0) {
-    Write-Note "Nothing to commit -- the working tree already matches the last commit."
-    exit 0
+    if (-not $hasCommits) {
+        Write-Bad "Nothing to commit and no commits exist -- is this the right folder?"
+        exit 1
+    }
+    Write-Note "Nothing new to commit; the existing commit will be pushed."
+} else {
+    Write-Good "$($staged.Count) files staged."
 }
-Write-Good "$($staged.Count) files staged."
 
 # ------------------------------------------------- 3. refuse to leak stuff --
 
@@ -141,9 +155,13 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_014JoqdWouAZm1pqceAGBS48
 "@
 
-git commit -q -m $body
-if ($LASTEXITCODE -ne 0) { Write-Bad "git commit failed."; exit 1 }
-Write-Good "Committed."
+if ($staged.Count -eq 0) {
+    Write-Note "Skipped (nothing new)."
+} else {
+    git commit -q -m $body
+    if ($LASTEXITCODE -ne 0) { Write-Bad "git commit failed."; exit 1 }
+    Write-Good "Committed."
+}
 
 # -------------------------------------------------------------- 5. push --
 
@@ -152,14 +170,20 @@ Write-Step "GitHub"
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
     Write-Note "GitHub CLI (gh) is not installed, so the repo was NOT created."
     Write-Host ""
-    Write-Host "  Either install it:  winget install GitHub.cli" -ForegroundColor Yellow
-    Write-Host "  then run:           gh auth login;  .\push-to-github.ps1" -ForegroundColor Yellow
+    Write-Host "  EASIEST -- install it, then just re-run this script:" -ForegroundColor Yellow
+    Write-Host "    winget install GitHub.cli" -ForegroundColor White
+    Write-Host "    (close and reopen PowerShell so gh lands on PATH)" -ForegroundColor DarkGray
+    Write-Host "    gh auth login" -ForegroundColor White
+    Write-Host "    .\push-to-github.ps1" -ForegroundColor White
     Write-Host ""
-    Write-Host "  Or create the repo yourself at https://github.com/new (set it to Private)," -ForegroundColor Yellow
-    Write-Host "  then:" -ForegroundColor Yellow
-    Write-Host "    git remote add origin https://github.com/<you>/$RepoName.git" -ForegroundColor Yellow
-    Write-Host "    git branch -M main" -ForegroundColor Yellow
-    Write-Host "    git push -u origin main" -ForegroundColor Yellow
+    Write-Host "  MANUAL -- create the repo at https://github.com/new (tick Private, add no" -ForegroundColor Yellow
+    Write-Host "  README/.gitignore), then run these, replacing YOUR-USERNAME with your actual" -ForegroundColor Yellow
+    Write-Host "  GitHub username (the one in your profile URL):" -ForegroundColor Yellow
+    Write-Host "    git branch -M main" -ForegroundColor White
+    Write-Host "    git remote add origin https://github.com/YOUR-USERNAME/$RepoName.git" -ForegroundColor White
+    Write-Host "    git push -u origin main" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  (Your commit is already saved locally either way -- nothing is lost.)" -ForegroundColor DarkGray
     exit 0
 }
 

@@ -18,7 +18,7 @@ from app.core.config import STT_LOCAL_MODEL_SIZES, settings
 from app.core.queue import enqueue
 from app.core.storage import new_object_key, storage
 from app.db.models import RenderedClip, StreamJob, User
-from app.schemas import FacecamRectRequest, RenderedClipOut, StreamJobOut
+from app.schemas import LayoutRegionsRequest, RenderedClipOut, StreamJobOut
 from app.workers import ingest
 from app.workers.common import audio_object_key, run_subprocess
 
@@ -316,39 +316,47 @@ def get_stream_job_frame(
     )
 
 
-@router.put("/{stream_job_id}/facecam-rect", response_model=StreamJobOut)
-def set_stream_job_facecam_rect(
+@router.put("/{stream_job_id}/layout-regions", response_model=StreamJobOut)
+def set_stream_job_layout_regions(
     stream_job_id: uuid.UUID,
-    payload: FacecamRectRequest,
+    payload: LayoutRegionsRequest,
     db: Session = DbDep,
     user: User = CurrentUserDep,
 ) -> StreamJob:
-    """Record (or clear) the hand-marked facecam box for this job.
+    """Record (or clear) the hand-marked facecam and content regions.
 
-    Takes effect on the NEXT render of this job's clips -- clips already
-    rendered keep the framing they were rendered with, since re-rendering
-    is not something the MVP does automatically. In practice the useful
-    moment to set this is right after upload, while transcription and
-    segmentation are still running: rendering is minutes away, so the mark
-    lands in time for the first render without anything being re-done.
+    These replace guessing. `facecam` forces the split layout and fixes its
+    top panel; `gameplay` fixes the bottom panel, or -- when nothing is
+    split -- the region a single 9:16 crop is taken from. Face detection,
+    classify_reaction_layout and crop_bias are all bypassed for whichever
+    region is marked, because each of those exists only to guess at what is
+    being stated here directly.
 
-    `rect: null` clears it and returns the job to automatic detection.
+    Takes effect on the NEXT render of this job's clips; clips already
+    rendered keep the framing they were rendered with. The useful moment is
+    right after upload, while transcription and segmentation are still
+    running -- rendering is minutes away, so a mark made then lands in time
+    for the first render with nothing re-done.
     """
     job = _get_owned_job(db, user, stream_job_id)
+    provided = payload.model_fields_set
 
-    if payload.rect is None:
-        job.facecam_rect = None
-    else:
-        rect = payload.rect
-        # Per-field bounds are enforced by the schema; this is the one
-        # constraint that spans fields -- a box may not run off the frame.
+    for field, column in (("facecam", "facecam_rect"), ("gameplay", "gameplay_rect")):
+        if field not in provided:
+            continue  # omitted entirely -- leave this region untouched
+        rect = getattr(payload, field)
+        if rect is None:
+            setattr(job, column, None)
+            continue
+        # Per-field bounds come from the schema; this is the one constraint
+        # that spans fields -- a box may not run off the edge of the frame.
         if rect.x + rect.w > 1.0 or rect.y + rect.h > 1.0:
             raise ApiError(
-                400, "invalid_facecam_rect",
-                "The box extends past the edge of the frame "
+                400, "invalid_layout_region",
+                f"The {field} box extends past the edge of the frame "
                 f"(x+w={rect.x + rect.w:.3f}, y+h={rect.y + rect.h:.3f}; both must be <= 1.0)",
             )
-        job.facecam_rect = {"x": rect.x, "y": rect.y, "w": rect.w, "h": rect.h}
+        setattr(job, column, {"x": rect.x, "y": rect.y, "w": rect.w, "h": rect.h})
 
     db.commit()
     db.refresh(job)

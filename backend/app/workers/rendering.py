@@ -103,7 +103,7 @@ from app.core.caption_generation import generate_caption_annotation
 from app.core.config import settings
 from app.core.face_detect import estimate_face_profile
 from app.core.rendering_logic import (
-    crop_from_facecam_rect,
+    crop_from_marked_rect,
     append_subtitles_stage,
     build_concat_prefix,
     build_fit_frame_filtergraph,
@@ -489,7 +489,8 @@ def run(candidate_segment_id: str) -> None:
         stream_job_id = job.id
         camera_layout_mode = job.camera_layout_mode  # None ("auto") | single_crop | split_reaction | fit_frame
         crop_bias = job.crop_bias
-        facecam_rect = job.facecam_rect  # None | "left" | "center" | "right" -- see compute_crop_offset
+        facecam_rect = job.facecam_rect
+        gameplay_rect = job.gameplay_rect  # None | "left" | "center" | "right" -- see compute_crop_offset
 
         transcript = db.query(Transcript).filter_by(stream_job_id=job.id).one_or_none()
         transcript_segments = list(transcript.segments) if transcript else []
@@ -575,9 +576,28 @@ def run(candidate_segment_id: str) -> None:
         manual_cam_crop = None
         if facecam_rect:
             try:
-                manual_cam_crop = crop_from_facecam_rect(width, height, facecam_rect, half_ratio)
+                manual_cam_crop = crop_from_marked_rect(width, height, facecam_rect, half_ratio)
             except ValueError as exc:
                 log.warning("rendering.facecam_rect_invalid", error=str(exc), rect=facecam_rect)
+
+        # The content region, marked the same way. Resolved against two
+        # different target ratios because it feeds two different panels:
+        # the split layout's bottom half, or -- when nothing is split -- the
+        # whole 9:16 frame. A centered crop of a 16:9 gameplay frame throws
+        # away two thirds of the width without knowing which third mattered;
+        # this is how the creator says which third mattered.
+        manual_main_crop = None
+        manual_full_crop = None
+        if gameplay_rect:
+            try:
+                manual_main_crop = crop_from_marked_rect(width, height, gameplay_rect, half_ratio)
+                manual_full_crop = crop_from_marked_rect(
+                    width, height, gameplay_rect, TARGET_WIDTH / TARGET_HEIGHT
+                )
+            except ValueError as exc:
+                log.warning("rendering.gameplay_rect_invalid", error=str(exc), rect=gameplay_rect)
+                manual_main_crop = None
+                manual_full_crop = None
 
         is_fit_frame_layout = camera_layout_mode == "fit_frame"
         if is_fit_frame_layout:
@@ -613,6 +633,7 @@ def run(candidate_segment_id: str) -> None:
             camera_layout_mode=camera_layout_mode or "auto",
             crop_bias=crop_bias or "none",
             facecam_source=("marked" if manual_cam_crop is not None else "detected" if face_profile else "none"),
+            gameplay_source=("marked" if manual_main_crop is not None else "auto"),
         )
 
         if is_fit_frame_layout:
@@ -627,15 +648,24 @@ def run(candidate_segment_id: str) -> None:
             else:
                 face_scale = face_profile["area"] ** 0.5
                 cam_crop = compute_face_zoom_crop(width, height, face_profile["center"], face_scale, half_ratio)
-            main_w, main_h = compute_vertical_crop(width, height, target_ratio=half_ratio)
-            main_x, main_y = compute_crop_offset(
-                width, height, main_w, main_h, focal_point=None, bias=crop_bias
-            )
+            if manual_main_crop is not None:
+                main_w, main_h, main_x, main_y = manual_main_crop
+            else:
+                main_w, main_h = compute_vertical_crop(width, height, target_ratio=half_ratio)
+                main_x, main_y = compute_crop_offset(
+                    width, height, main_w, main_h, focal_point=None, bias=crop_bias
+                )
             filtergraph = build_split_reaction_filtergraph(cam_crop, (main_w, main_h, main_x, main_y), half_w, half_h)
         else:
-            crop_w, crop_h = compute_vertical_crop(width, height)
-            focal_point = face_profile["center"] if face_profile else None
-            crop_x, crop_y = compute_crop_offset(width, height, crop_w, crop_h, focal_point, bias=crop_bias)
+            if manual_full_crop is not None:
+                # An explicitly marked content region beats both face
+                # following and crop_bias: those exist to GUESS which part
+                # of the frame matters, and this is being told.
+                crop_w, crop_h, crop_x, crop_y = manual_full_crop
+            else:
+                crop_w, crop_h = compute_vertical_crop(width, height)
+                focal_point = face_profile["center"] if face_profile else None
+                crop_x, crop_y = compute_crop_offset(width, height, crop_w, crop_h, focal_point, bias=crop_bias)
             filtergraph = build_single_crop_filtergraph(crop_w, crop_h, crop_x, crop_y, TARGET_WIDTH, TARGET_HEIGHT)
 
         # Captions have to be remapped onto the stitched timeline for a

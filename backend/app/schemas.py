@@ -25,10 +25,11 @@ class StreamJobOut(BaseModel):
     # 'left' | 'center' | 'right' | None -- which side of the frame a
     # cropping layout should favour. See StreamJob.crop_bias.
     crop_bias: str | None
-    # {"x","y","w","h"} as fractions of the source frame, or None. The
-    # facecam box marked by hand in the dev console -- see
-    # StreamJob.facecam_rect.
+    # {"x","y","w","h"} as fractions of the source frame, or None -- the
+    # regions marked by hand in the dev console. See StreamJob.facecam_rect
+    # / StreamJob.gameplay_rect.
     facecam_rect: dict | None
+    gameplay_rect: dict | None
     retry_count: int
     last_error: str | None
     created_at: datetime
@@ -37,7 +38,7 @@ class StreamJobOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class FacecamRect(BaseModel):
+class MarkedRect(BaseModel):
     """A box on the source frame, normalized to 0..1.
 
     Normalized rather than pixels so the value stays correct regardless of
@@ -51,14 +52,20 @@ class FacecamRect(BaseModel):
     h: float = Field(gt=0.0, le=1.0)
 
 
-class FacecamRectRequest(BaseModel):
-    """Body for PUT /stream-jobs/{id}/facecam-rect.
+class LayoutRegionsRequest(BaseModel):
+    """Body for PUT /stream-jobs/{id}/layout-regions.
 
-    `rect: null` clears the mark and returns the job to automatic face
-    detection.
+    Both fields are optional and independent:
+      * omitted        -> leave that region exactly as it is
+      * explicit null  -> clear that region (back to automatic behaviour)
+      * a rect         -> set it
+    The omitted/null distinction is read from `model_fields_set`, so saving
+    only the facecam never silently wipes a gameplay region the creator
+    marked earlier (and vice versa).
     """
 
-    rect: FacecamRect | None = None
+    facecam: MarkedRect | None = None
+    gameplay: MarkedRect | None = None
 
 
 class VodImportRequest(BaseModel):

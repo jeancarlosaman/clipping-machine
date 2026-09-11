@@ -189,6 +189,20 @@ class StreamJob(Base):
     # before: detect a face and let camera_layout_mode/classify decide.
     facecam_rect: Mapped[dict | None] = mapped_column(JSONB)
 
+    # The other half of the same idea: which part of the frame is the actual
+    # CONTENT (gameplay, screen share, whatever the viewer is meant to be
+    # looking at), same normalized {"x","y","w","h"} shape as facecam_rect.
+    #
+    # Used as the bottom panel of the split layout, and -- when no split is
+    # happening -- as the region a single 9:16 crop is taken from, which is
+    # the direct answer to "the screen is not showing the most important
+    # parts": a centered crop of a 16:9 gameplay frame throws away two
+    # thirds of the width with no idea which third mattered.
+    #
+    # Null = behave exactly as before (center/face-driven crop of the whole
+    # frame).
+    gameplay_rect: Mapped[dict | None] = mapped_column(JSONB)
+
     # Scene-cut timestamps (seconds) detected once by segmentation.py and
     # persisted here so scoring.py can reuse them instead of re-downloading
     # the raw video and re-running PySceneDetect from scratch -- see

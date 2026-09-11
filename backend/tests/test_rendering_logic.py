@@ -13,7 +13,7 @@ from app.core.rendering_logic import (
     build_srt,
     build_title_srt,
     classify_reaction_layout,
-    crop_from_facecam_rect,
+    crop_from_marked_rect,
     compute_crop_offset,
     compute_face_zoom_crop,
     compute_vertical_crop,
@@ -477,7 +477,7 @@ def test_build_multipart_srt_is_empty_when_no_part_has_text():
     assert build_multipart_srt(segments, [(10.0, 13.0), (50.0, 53.0)]) == ""
 
 
-# ---- crop_from_facecam_rect (hand-marked facecam box) ----
+# ---- crop_from_marked_rect (hand-marked facecam box) ----
 #
 # The split layout's top panel is 1080x960, so every case below resolves the
 # marked box against that ratio.
@@ -486,54 +486,54 @@ _HALF_RATIO = 1080 / 960
 _TYPICAL_RECT = {"x": 0.72, "y": 0.60, "w": 0.26, "h": 0.36}
 
 
-def test_crop_from_facecam_rect_contains_the_whole_marked_box():
+def test_crop_from_marked_rect_contains_the_whole_marked_box():
     # The one property that matters: the creator drew a box around the
     # facecam, so the crop must never cut into it.
-    w, h, x, y = crop_from_facecam_rect(1920, 1080, _TYPICAL_RECT, _HALF_RATIO)
+    w, h, x, y = crop_from_marked_rect(1920, 1080, _TYPICAL_RECT, _HALF_RATIO)
     assert x <= _TYPICAL_RECT["x"] * 1920
     assert y <= _TYPICAL_RECT["y"] * 1080
     assert x + w >= (_TYPICAL_RECT["x"] + _TYPICAL_RECT["w"]) * 1920
     assert y + h >= (_TYPICAL_RECT["y"] + _TYPICAL_RECT["h"]) * 1080
 
 
-def test_crop_from_facecam_rect_matches_the_target_aspect_ratio():
-    w, h, _, _ = crop_from_facecam_rect(1920, 1080, _TYPICAL_RECT, _HALF_RATIO)
+def test_crop_from_marked_rect_matches_the_target_aspect_ratio():
+    w, h, _, _ = crop_from_marked_rect(1920, 1080, _TYPICAL_RECT, _HALF_RATIO)
     assert abs((w / h) - _HALF_RATIO) < 0.02
 
 
-def test_crop_from_facecam_rect_stays_inside_the_frame():
+def test_crop_from_marked_rect_stays_inside_the_frame():
     for rect in (
         {"x": 0.0, "y": 0.0, "w": 0.15, "h": 0.20},     # hard against the top-left
         {"x": 0.85, "y": 0.80, "w": 0.15, "h": 0.20},   # hard against the bottom-right
         _TYPICAL_RECT,
     ):
-        w, h, x, y = crop_from_facecam_rect(1920, 1080, rect, _HALF_RATIO)
+        w, h, x, y = crop_from_marked_rect(1920, 1080, rect, _HALF_RATIO)
         assert x >= 0 and y >= 0
         assert x + w <= 1920 and y + h <= 1080
 
 
-def test_crop_from_facecam_rect_allows_a_zero_offset():
+def test_crop_from_marked_rect_allows_a_zero_offset():
     # Regression: an earlier version floored offsets to 2 (the minimum for a
     # crop *size*), nudging the window off a facecam pinned to the very edge
     # of the frame -- i.e. the most common case.
-    _, _, x, y = crop_from_facecam_rect(
+    _, _, x, y = crop_from_marked_rect(
         1920, 1080, {"x": 0.0, "y": 0.0, "w": 0.15, "h": 0.20}, _HALF_RATIO
     )
     assert (x, y) == (0, 0)
 
 
-def test_crop_from_facecam_rect_returns_even_numbers():
+def test_crop_from_marked_rect_returns_even_numbers():
     # yuv420p needs even dimensions; an odd crop makes ffmpeg fail or shift
     # a pixel silently.
-    for value in crop_from_facecam_rect(1919, 1079, _TYPICAL_RECT, _HALF_RATIO):
+    for value in crop_from_marked_rect(1919, 1079, _TYPICAL_RECT, _HALF_RATIO):
         assert value % 2 == 0
 
 
-def test_crop_from_facecam_rect_shrinks_a_box_too_large_for_the_frame():
+def test_crop_from_marked_rect_shrinks_a_box_too_large_for_the_frame():
     # A box covering the whole frame can't be grown to the target ratio, so
     # the largest correctly-proportioned window is used instead of returning
     # something off-frame or stretched.
-    w, h, x, y = crop_from_facecam_rect(
+    w, h, x, y = crop_from_marked_rect(
         1920, 1080, {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}, _HALF_RATIO
     )
     assert w <= 1920 and h <= 1080
@@ -541,19 +541,19 @@ def test_crop_from_facecam_rect_shrinks_a_box_too_large_for_the_frame():
     assert abs((w / h) - _HALF_RATIO) < 0.02
 
 
-def test_crop_from_facecam_rect_grows_a_wide_box_vertically():
+def test_crop_from_marked_rect_grows_a_wide_box_vertically():
     # Box wider than the target ratio: height grows, width is preserved.
-    w, h, _, _ = crop_from_facecam_rect(
+    w, h, _, _ = crop_from_marked_rect(
         1920, 1080, {"x": 0.1, "y": 0.4, "w": 0.6, "h": 0.1}, _HALF_RATIO
     )
     assert h > 0.1 * 1080
     assert abs((w / h) - _HALF_RATIO) < 0.02
 
 
-def test_crop_from_facecam_rect_is_resolution_independent():
+def test_crop_from_marked_rect_is_resolution_independent():
     # Same normalized mark, two source resolutions -> same relative window.
-    big = crop_from_facecam_rect(1920, 1080, _TYPICAL_RECT, _HALF_RATIO)
-    small = crop_from_facecam_rect(1280, 720, _TYPICAL_RECT, _HALF_RATIO)
+    big = crop_from_marked_rect(1920, 1080, _TYPICAL_RECT, _HALF_RATIO)
+    small = crop_from_marked_rect(1280, 720, _TYPICAL_RECT, _HALF_RATIO)
     assert abs((big[0] / 1920) - (small[0] / 1280)) < 0.01
     assert abs((big[2] / 1920) - (small[2] / 1280)) < 0.01
 
@@ -566,8 +566,8 @@ def test_crop_from_facecam_rect_is_resolution_independent():
         {"x": "a", "y": 0.0, "w": 0.1, "h": 0.1},   # not a number
     ],
 )
-def test_crop_from_facecam_rect_rejects_a_malformed_rect(rect):
+def test_crop_from_marked_rect_rejects_a_malformed_rect(rect):
     # Callers treat ValueError as "behave as if nothing was marked" rather
     # than failing the render -- see app/workers/rendering.py.
     with pytest.raises(ValueError):
-        crop_from_facecam_rect(1920, 1080, rect, _HALF_RATIO)
+        crop_from_marked_rect(1920, 1080, rect, _HALF_RATIO)

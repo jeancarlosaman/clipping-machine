@@ -361,3 +361,49 @@ footer {
   border-radius: 2px;
   pointer-events: none; /* never swallow the drag it is drawn by */
 }
+
+/* ---- two-region marker: mode buttons + saved box labels ---- */
+.facecam-modes {
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 6px;
+}
+
+.mode-btn {
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(127, 127, 127, 0.45);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.mode-btn.active {
+  border-color: #4ade80;
+  background: rgba(74, 222, 128, 0.15);
+  font-weight: 600;
+}
+
+#mode-gameplay.active {
+  border-color: #60a5fa;
+  background: rgba(96, 165, 250, 0.15);
+}
+
+/* Saved boxes stay drawn while a new one is being dragged, so you can see
+   the facecam mark while placing the gameplay mark and vice versa. */
+.facecam-box.saved {
+  pointer-events: none;
+}
+
+.facecam-box-tag {
+  position: absolute;
+  top: -1px;
+  left: -1px;
+  padding: 1px 6px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: #10141a;
+  border-radius: 2px;
+  line-height: 1.4;
+}

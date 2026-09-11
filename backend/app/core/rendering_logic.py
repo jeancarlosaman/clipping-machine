@@ -182,7 +182,7 @@ def classify_reaction_layout(
     return (near_left or near_right) and (near_top or near_bottom)
 
 
-def crop_from_facecam_rect(
+def crop_from_marked_rect(
     width: int,
     height: int,
     rect: dict,
@@ -190,10 +190,12 @@ def crop_from_facecam_rect(
 ) -> tuple[int, int, int, int]:
     """(crop_w, crop_h, crop_x, crop_y) for a hand-marked facecam box.
 
-    `rect` is StreamJob.facecam_rect: {"x","y","w","h"} as fractions of the
-    source frame (0..1), marked by the creator on a real frame of their own
-    VOD. `target_ratio` is the output panel's width/height -- the split
-    layout's top half.
+    `rect` is a marked region -- StreamJob.facecam_rect or
+    StreamJob.gameplay_rect: {"x","y","w","h"} as fractions of the source
+    frame (0..1), drawn by the creator on a real frame of their own VOD.
+    `target_ratio` is the width/height of the panel it has to fill (the
+    split layout's top or bottom half, or the full 9:16 frame for a single
+    crop).
 
     The marked box is treated as the MINIMUM that must stay visible: the
     window is grown (never shrunk) on whichever axis is short of
