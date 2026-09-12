@@ -27,12 +27,21 @@ from app.core.storage import storage
 from app.core.stt import PermanentSttError, TransientSttError, get_stt_provider
 from app.db.models import StreamJob, Transcript
 from app.workers import segmentation
-from app.workers.common import audio_object_key, db_session, estimate_job_timeout_seconds, logger
+from app.workers.common import audio_object_key, db_session, estimate_job_timeout_seconds, job_is_cancelled, logger
 
 
 def run(stream_job_id: str) -> None:
     log = logger.bind(stream_job_id=stream_job_id, worker="transcription")
     log.info("transcription.start")
+
+    # Cooperative cancel (see app.workers.common.job_is_cancelled): stop at
+    # this stage boundary instead of doing the work and enqueuing the next
+    # stage. Returning rather than raising keeps this out of the failure
+    # path -- a cancelled job is not a failed one, and must not burn retries
+    # or trip the on_failure callback.
+    if job_is_cancelled(stream_job_id):
+        log.info("transcription.cancelled")
+        return
 
     with db_session() as db:
         job = db.get(StreamJob, uuid.UUID(stream_job_id))

@@ -1,6 +1,7 @@
 """POST/GET /api/v1/stream-jobs -- architecture doc §6."""
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 import uuid
@@ -18,7 +19,7 @@ from app.core.config import STT_LOCAL_MODEL_SIZES, settings
 from app.core.queue import enqueue
 from app.core.storage import new_object_key, storage
 from app.db.models import RenderedClip, StreamJob, User
-from app.schemas import LayoutRegionsRequest, RenderedClipOut, StreamJobOut
+from app.schemas import LayoutRegionsRequest, MarkedRect, RenderedClipOut, StreamJobOut
 from app.workers import ingest
 from app.workers.common import audio_object_key, run_subprocess
 
@@ -39,6 +40,83 @@ CAMERA_LAYOUT_MODES = ("auto", "single_crop", "split_reaction", "fit_frame")
 CROP_BIASES = ("left", "center", "right")
 
 
+def _parse_marked_rect(raw: str | None, field: str) -> dict | None:
+    """A framing region submitted as a JSON string in multipart form data.
+
+    The upload form has to send these as strings (multipart has no nested
+    objects), so they arrive as e.g. '{"x":0.72,"y":0.6,"w":0.26,"h":0.36}'.
+    Validated through the same MarkedRect model the JSON endpoint uses, so
+    the two paths cannot drift apart on what counts as a valid box.
+
+    Returns None for absent/blank, which means "not marked" -- the same
+    thing the column's default means.
+    """
+    if raw is None or not raw.strip():
+        return None
+    try:
+        rect = MarkedRect.model_validate(json.loads(raw))
+    except Exception as exc:
+        raise ApiError(400, f"invalid_{field}", f"{field} must be a JSON object with x/y/w/h in 0..1: {exc}")
+    if rect.x + rect.w > 1.0 or rect.y + rect.h > 1.0:
+        raise ApiError(
+            400, f"invalid_{field}",
+            f"The {field} box extends past the edge of the frame "
+            f"(x+w={rect.x + rect.w:.3f}, y+h={rect.y + rect.h:.3f}; both must be <= 1.0)",
+        )
+    return {"x": rect.x, "y": rect.y, "w": rect.w, "h": rect.h}
+
+
+# Each entry: (json key, python type, min, max). The bounds are the same
+# ones documented on the matching settings.* field -- notably caption_margin_v
+# must not drop below 50, which is where the caption band starts colliding
+# with TikTok's own bottom UI. A preview slider in a browser is trivially
+# bypassed, so the real limit has to live here.
+STYLE_OVERRIDE_BOUNDS = {
+    "split_facecam_fraction": (float, 0.2, 0.8),
+    "caption_font_size": (int, 5, 20),
+    "caption_margin_v": (int, 50, 200),
+    "caption_max_chars": (int, 20, 200),
+    "title_font_size": (int, 6, 30),
+    "title_margin_v": (int, 30, 200),
+}
+
+
+def _parse_style_overrides(raw: str | None) -> dict | None:
+    """Per-job burn-in styling, submitted as a JSON string in the upload form.
+
+    Unknown keys are rejected rather than ignored: a typo'd key would
+    otherwise be silently dropped and the creator would spend a render
+    wondering why nothing changed.
+    """
+    if raw is None or not raw.strip():
+        return None
+    try:
+        data = json.loads(raw)
+    except Exception as exc:
+        raise ApiError(400, "invalid_style_overrides", f"style_overrides must be a JSON object: {exc}")
+    if not isinstance(data, dict):
+        raise ApiError(400, "invalid_style_overrides", "style_overrides must be a JSON object")
+
+    unknown = sorted(set(data) - set(STYLE_OVERRIDE_BOUNDS))
+    if unknown:
+        raise ApiError(
+            400, "invalid_style_overrides",
+            f"Unknown style keys: {unknown}. Allowed: {sorted(STYLE_OVERRIDE_BOUNDS)}",
+        )
+
+    cleaned: dict = {}
+    for key, value in data.items():
+        kind, low, high = STYLE_OVERRIDE_BOUNDS[key]
+        try:
+            typed = kind(value)
+        except (TypeError, ValueError):
+            raise ApiError(400, "invalid_style_overrides", f"{key} must be a {kind.__name__}")
+        if not (low <= typed <= high):
+            raise ApiError(400, "invalid_style_overrides", f"{key} must be between {low} and {high}")
+        cleaned[key] = typed
+    return cleaned or None
+
+
 def _validate_job_overrides(
     *,
     max_clips: int | None,
@@ -48,6 +126,9 @@ def _validate_job_overrides(
     stt_model_size: str | None,
     camera_layout_mode: str | None,
     crop_bias: str | None,
+    facecam_rect: str | None = None,
+    gameplay_rect: str | None = None,
+    style_overrides: str | None = None,
 ) -> dict:
     """Validates the optional per-job overrides a creator can set at upload
     time. Raises ApiError(400, ...) on anything out of bounds -- these bounds
@@ -125,6 +206,12 @@ def _validate_job_overrides(
         # CAMERA_LAYOUT_MODES' comment above.
         "camera_layout_mode": camera_layout_mode if camera_layout_mode != "auto" else None,
         "crop_bias": crop_bias,
+        # Marked at upload time in the browser, from a frame of the file the
+        # creator just picked -- so the very first render already frames
+        # correctly instead of needing the job to exist first.
+        "facecam_rect": _parse_marked_rect(facecam_rect, "facecam_rect"),
+        "gameplay_rect": _parse_marked_rect(gameplay_rect, "gameplay_rect"),
+        "style_overrides": _parse_style_overrides(style_overrides),
     }
 
 
@@ -138,6 +225,9 @@ def create_stream_job_from_upload(
     stt_model_size: str | None = Form(default=None),
     camera_layout_mode: str | None = Form(default=None),
     crop_bias: str | None = Form(default=None),
+    facecam_rect: str | None = Form(default=None),
+    gameplay_rect: str | None = Form(default=None),
+    style_overrides: str | None = Form(default=None),
     db: Session = DbDep,
     user: User = CurrentUserDep,
 ) -> StreamJob:
@@ -156,6 +246,9 @@ def create_stream_job_from_upload(
         stt_model_size=stt_model_size,
         camera_layout_mode=camera_layout_mode,
         crop_bias=crop_bias,
+        facecam_rect=facecam_rect,
+        gameplay_rect=gameplay_rect,
+        style_overrides=style_overrides,
     )
 
     # Stream to a temp file first so we can enforce the size cap without
@@ -358,6 +451,58 @@ def set_stream_job_layout_regions(
             )
         setattr(job, column, {"x": rect.x, "y": rect.y, "w": rect.w, "h": rect.h})
 
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+# Cancelling a job that has already finished (or already failed) is
+# meaningless, and silently "succeeding" would make the console lie about
+# what happened -- so these are refused rather than accepted as a no-op.
+TERMINAL_JOB_STATUSES = (
+    "ready_for_review",
+    "archived",
+    "cancelled",
+    "failed_ingest",
+    "failed_transcription",
+    "failed_segmentation",
+    "failed_scoring",
+    "failed_rendering",
+)
+
+
+@router.post("/{stream_job_id}/cancel", response_model=StreamJobOut)
+def cancel_stream_job(
+    stream_job_id: uuid.UUID,
+    db: Session = DbDep,
+    user: User = CurrentUserDep,
+) -> StreamJob:
+    """Stop a running job at its next stage boundary.
+
+    Cooperative, not a kill: this only sets the status. Each worker checks it
+    at the top of its stage (app.workers.common.job_is_cancelled) and returns
+    without enqueuing the next one, so whatever is mid-flight right now --
+    a transcription pass, an ffmpeg render -- finishes first. The pipeline
+    then stops with nothing half-written: no truncated mp4, no orphaned temp
+    directory, no row left in an impossible state.
+
+    In practice that means cancelling during transcription of a long VOD can
+    take a few minutes to visibly stop. That is the deliberate trade; the
+    alternative (killing the subprocess) saves those minutes and gives up the
+    cleanup guarantee.
+
+    Queued-but-not-started work stops immediately, since those jobs hit the
+    check before doing anything.
+    """
+    job = _get_owned_job(db, user, stream_job_id)
+
+    if job.status in TERMINAL_JOB_STATUSES:
+        raise ApiError(
+            409, "not_cancellable",
+            f"This job is already finished (status: {job.status}) -- nothing to cancel.",
+        )
+
+    job.status = "cancelled"
     db.commit()
     db.refresh(job)
     return job

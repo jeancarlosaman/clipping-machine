@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sign in — Clipping Machine</title>
+  <link rel="stylesheet" href="/style.css" />
+  <style>
+    /* Page-specific only; everything else comes from the shared stylesheet. */
+    body { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 24px; }
+    .auth-card { width: 100%; max-width: 400px; }
+    .auth-card .panel { padding: 26px 26px 22px; }
+    .auth-tabs { display: flex; gap: 6px; margin-bottom: 20px; }
+    .auth-tabs button {
+      flex: 1; background: transparent; color: var(--text-dim);
+      border: 1px solid var(--line); font-weight: 500;
+    }
+    .auth-tabs button.active {
+      border-color: var(--silver); color: var(--text);
+      background: var(--surface-3); font-weight: 650;
+    }
+    .auth-card label { display: flex; margin-bottom: 14px; }
+    .auth-card input { width: 100%; }
+    .auth-card button[type="submit"] { width: 100%; margin-top: 4px; padding: 9px; }
+    .auth-error {
+      background: rgba(248,113,113,.1); border: 1px solid rgba(248,113,113,.35);
+      border-radius: var(--radius-sm); padding: 10px 12px; margin-bottom: 14px;
+      font-size: 13px; color: #fca5a5;
+    }
+    .brand { text-align: center; margin-bottom: 18px; }
+    .brand h1 { margin: 0 0 4px; }
+  </style>
+</head>
+<body>
+  <div class="auth-card">
+    <div class="brand">
+      <h1>Clipping Machine</h1>
+      <p class="muted small" style="margin:0">VOD in, ranked clips out.</p>
+    </div>
+
+    <div class="panel">
+      <div class="auth-tabs">
+        <button type="button" id="tab-login" class="active">Sign in</button>
+        <button type="button" id="tab-signup">Create account</button>
+      </div>
+
+      <div id="auth-error" class="auth-error" hidden></div>
+
+      <form id="auth-form" autocomplete="on">
+        <label>
+          Email
+          <input type="email" id="email" name="email" required autocomplete="username" />
+        </label>
+        <label>
+          Password
+          <input type="password" id="password" name="password" required
+                 autocomplete="current-password" />
+        </label>
+        <label id="invite-wrap" hidden>
+          Invite code
+          <input type="text" id="invite" name="invite" autocomplete="off" />
+        </label>
+        <button type="submit" id="submit-btn">Sign in</button>
+      </form>
+
+      <p class="muted small" id="auth-hint" style="margin:14px 0 0">
+        No password reset yet — if you lock yourself out, re-run
+        <code>scripts/create_dev_user.py</code>.
+      </p>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = "";
+    let mode = "login";
+
+    const $ = (s) => document.querySelector(s);
+    const errBox = $("#auth-error");
+
+    function showError(message) {
+      errBox.textContent = message;
+      errBox.hidden = false;
+    }
+
+    function setMode(next) {
+      mode = next;
+      const isSignup = next === "signup";
+      $("#tab-login").classList.toggle("active", !isSignup);
+      $("#tab-signup").classList.toggle("active", isSignup);
+      $("#submit-btn").textContent = isSignup ? "Create account" : "Sign in";
+      // The invite field only appears for signup, and only matters if the
+      // server was configured to require one -- an empty SIGNUP_INVITE_CODE
+      // means open signup and the server ignores whatever is sent.
+      $("#invite-wrap").hidden = !isSignup;
+      $("#password").setAttribute("autocomplete", isSignup ? "new-password" : "current-password");
+      $("#auth-hint").textContent = isSignup
+        ? "Passwords must be at least 10 characters. Length matters far more than symbols."
+        : "No password reset yet — if you lock yourself out, re-run scripts/create_dev_user.py.";
+      errBox.hidden = true;
+    }
+
+    $("#tab-login").addEventListener("click", () => setMode("login"));
+    $("#tab-signup").addEventListener("click", () => setMode("signup"));
+
+    $("#auth-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      errBox.hidden = true;
+      const btn = $("#submit-btn");
+      btn.disabled = true;
+
+      const body = { email: $("#email").value.trim(), password: $("#password").value };
+      if (mode === "signup") {
+        const code = $("#invite").value.trim();
+        if (code) body.invite_code = code;
+      }
+
+      try {
+        const resp = await fetch(`${API_BASE}/api/v1/auth/${mode}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!resp.ok) {
+          let message = `HTTP ${resp.status}`;
+          try {
+            const data = await resp.json();
+            message = data?.error?.message || data?.detail || message;
+          } catch { /* non-JSON error body -- keep the status line */ }
+          showError(message);
+          btn.disabled = false;
+          return;
+        }
+        // The session cookie is set by the response itself (httpOnly, so
+        // there is nothing to store here). Straight into the console.
+        window.location.href = "/";
+      } catch (err) {
+        showError(`Can't reach the API — is uvicorn running? (${err.message})`);
+        btn.disabled = false;
+      }
+    });
+
+    // Already signed in? Skip the form. But NOT when the server answered via
+    // dev auto-login: that ignores cookies entirely, so redirecting would
+    // bounce you straight back to the console the instant you signed out --
+    // an infinite loop with no way to reach this form.
+    fetch(`${API_BASE}/api/v1/auth/me`)
+      .then(async (r) => {
+        if (!r.ok) return;
+        const me = await r.json().catch(() => null);
+        if (me && me.auth_source === "dev_auto_login") {
+          showError(
+            "Dev auto-login is enabled (DEV_AUTO_LOGIN_EMAIL in .env), so the API treats every " +
+            "request as " + (me.email || "the dev user") + " and signing out has no effect. " +
+            "Comment that setting out and restart the API to use real logins."
+          );
+          return;
+        }
+        window.location.href = "/";
+      })
+      .catch(() => { /* server down; leave the form up */ });
+  </script>
+</body>
+</html>

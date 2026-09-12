@@ -33,12 +33,21 @@ from app.core.segmentation_logic import build_candidate_windows, detect_scene_cu
 from app.core.storage import storage
 from app.db.models import CandidateSegment, RenderedClip, ReviewDecision, StreamJob, Transcript
 from app.workers import scoring
-from app.workers.common import db_session, estimate_job_timeout_seconds, logger
+from app.workers.common import db_session, estimate_job_timeout_seconds, job_is_cancelled, logger
 
 
 def run(stream_job_id: str) -> None:
     log = logger.bind(stream_job_id=stream_job_id, worker="segmentation")
     log.info("segmentation.start")
+
+    # Cooperative cancel (see app.workers.common.job_is_cancelled): stop at
+    # this stage boundary instead of doing the work and enqueuing the next
+    # stage. Returning rather than raising keeps this out of the failure
+    # path -- a cancelled job is not a failed one, and must not burn retries
+    # or trip the on_failure callback.
+    if job_is_cancelled(stream_job_id):
+        log.info("segmentation.cancelled")
+        return
 
     with db_session() as db:
         job = db.get(StreamJob, uuid.UUID(stream_job_id))
@@ -262,8 +271,14 @@ def _llm_suggestions_safely(transcript_segments, min_len, max_len, user_id, log)
     """
     try:
         feedback_examples = _gather_feedback_examples(user_id, log)
+        from app.core.llm_config import resolve_llm_config_for_user_id
+
         return generate_llm_segment_suggestions(
-            transcript_segments, min_len, max_len, feedback_examples=feedback_examples
+            transcript_segments, min_len, max_len,
+            feedback_examples=feedback_examples,
+            # This creator's own provider/key, so their OpenAI key is what
+            # reads the transcript rather than whatever .env happens to say.
+            llm_config=resolve_llm_config_for_user_id(user_id),
         )
     except Exception as exc:
         log.warning("segmentation.llm_suggestions_failed", error=str(exc))

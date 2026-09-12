@@ -52,6 +52,7 @@ def generate_caption_annotation(
     end: float,
     score_breakdown: dict | None,
     existing_caption: str,
+    llm_config=None,
 ) -> dict:
     """Best-effort LLM title/hashtags/caption/explanation for one clip.
     Always returns a usable annotation dict -- never raises -- degrading to
@@ -69,18 +70,22 @@ def generate_caption_annotation(
     if not settings.enable_llm_captions:
         return _heuristic_annotation(score_breakdown, existing_caption, "disabled")
 
-    provider = settings.caption_llm_provider
-    if provider == "openai" and not settings.openai_api_key:
+    if llm_config is None:
+        from app.core.llm_config import resolve_llm_config
+
+        llm_config = resolve_llm_config(None)
+    if not llm_config.usable:
         return _heuristic_annotation(score_breakdown, existing_caption, "no_api_key")
+    provider = llm_config.provider
 
     if provider == "ollama":
-        base_url = settings.caption_ollama_base_url
-        api_key = "ollama"  # Ollama ignores this; the openai client just requires a non-empty string
-        model = settings.caption_ollama_model
+        base_url = llm_config.base_url
+        api_key = llm_config.api_key  # Ollama ignores it; the openai client needs a non-empty string
+        model = llm_config.model
     else:
         base_url = None  # openai package's own default (OpenAI's real API)
-        api_key = settings.openai_api_key
-        model = settings.caption_llm_model
+        api_key = llm_config.api_key
+        model = llm_config.model
 
     clip_text = window_text(transcript_segments, start, end)
     hint = heuristic_explanation(score_breakdown)

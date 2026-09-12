@@ -42,7 +42,7 @@ from app.core.segmentation_logic import detect_scene_cuts
 from app.core.storage import storage
 from app.db.models import CandidateSegment, RenderedClip, StreamJob, Transcript
 from app.workers import rendering
-from app.workers.common import audio_object_key, db_session, estimate_job_timeout_seconds, logger
+from app.workers.common import audio_object_key, db_session, estimate_job_timeout_seconds, job_is_cancelled, logger
 
 
 def _weights_from_settings() -> ScoreWeights:
@@ -127,6 +127,15 @@ def _compute_audio_events(
 def run(stream_job_id: str) -> None:
     log = logger.bind(stream_job_id=stream_job_id, worker="scoring")
     log.info("scoring.start")
+
+    # Cooperative cancel (see app.workers.common.job_is_cancelled): stop at
+    # this stage boundary instead of doing the work and enqueuing the next
+    # stage. Returning rather than raising keeps this out of the failure
+    # path -- a cancelled job is not a failed one, and must not burn retries
+    # or trip the on_failure callback.
+    if job_is_cancelled(stream_job_id):
+        log.info("scoring.cancelled")
+        return
 
     with db_session() as db:
         job = db.get(StreamJob, uuid.UUID(stream_job_id))

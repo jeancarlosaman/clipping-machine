@@ -31,6 +31,38 @@ class Settings(BaseSettings):
     app_env: Literal["development", "staging", "production"] = "development"
     log_level: str = "INFO"
     jwt_secret: str = "change-me-dev-only"
+    # Local-dev convenience: when set AND app_env == "development", an API
+    # request with NO Authorization header is treated as this user (created
+    # on first use) instead of 401ing, so the dev console needs no token
+    # pasted into it.
+    #
+    # Deliberately TWO conditions, and off by default. Auth is not decoration
+    # here: creator_accounts holds encrypted TikTok access/refresh tokens, so
+    # an unauthenticated API is one where anyone who can reach the port can
+    # post to the creator's TikTok. Requiring app_env=="development" as well
+    # means shipping this file to a staging/production box cannot silently
+    # open the API even if the variable is left set.
+    dev_auto_login_email: str | None = None
+
+    # --- Login / sessions (app/api/routers/auth.py) ---
+    # Empty = signup is open to anyone who can reach the page. Set a code to
+    # require it. Worth setting the moment this has a public IP: every signup
+    # can start jobs that cost real money per VOD in transcription.
+    signup_invite_code: str | None = None
+    session_cookie_name: str = "cm_session"
+    # 14 days. Long enough not to be annoying on a tool you use daily; short
+    # enough that a leaked cookie expires on its own. There is no refresh-token
+    # rotation -- overkill for one creator, and a half-built rotation scheme is
+    # worse than none.
+    session_ttl_minutes: int = 60 * 24 * 14
+    # Minimum password length. Length beats character-class rules (NIST 800-63B
+    # explicitly recommends against composition requirements), so this is the
+    # only rule.
+    min_password_length: int = 10
+    # Failed logins allowed per email+IP before a cooldown, and how long the
+    # window lasts. Backed by the Redis you already run for the job queue.
+    login_max_attempts: int = 10
+    login_attempt_window_seconds: int = 900
     max_upload_bytes: int = 8 * 1024 * 1024 * 1024  # 8 GiB
 
     # --- Creator account token encryption (app/core/crypto.py) ---
@@ -121,6 +153,46 @@ class Settings(BaseSettings):
     # transitions in real footage are harder, so if scene-derived boundaries
     # start looking sloppy on real VODs, drop this back to 2 before
     # suspecting anything else.
+    # --- Burned-in text (app/workers/rendering.py builds the ASS styles) ---
+    # All four measured against real libass renders on a 1080x1920 frame, not
+    # guessed from the ASS spec -- libass interprets FontSize against its own
+    # script resolution, so the numbers only mean anything empirically.
+    #
+    # FontSize 8 fits ~44 characters per line (45px line height); 10 fits ~39
+    # (56px). Combined with caption_max_chars below, 8 keeps a caption to two
+    # short lines instead of the four-line paragraph it used to produce.
+    caption_font_size: int = 8
+    # Distance from the bottom. TikTok's own bottom overlay (@username,
+    # caption text, audio marquee) covers roughly the bottom 334px, and
+    # MarginV=50 is exactly that boundary -- 55 clears it with ~34px to
+    # spare. Do NOT go below 50 without re-measuring: the dev console shows
+    # the raw clip, so a collision with the platform's UI is invisible there.
+    caption_margin_v: int = 55
+    # Hard cap on characters per caption entry. A Whisper segment is a whole
+    # sentence, which is why captions arrived as paragraphs; anything longer
+    # than this is split on a clause or word boundary with the segment's
+    # duration divided between the pieces. 80 == two lines at font size 8.
+    caption_max_chars: int = 80
+
+    # Share of the 1920px output height given to the facecam panel in the
+    # split layout; the gameplay panel gets the rest. 0.5 was an equal split,
+    # which hands a small webcam box as much screen as the gameplay it is
+    # reacting to -- almost never what the clip is actually about. 0.35 gives
+    # the cam 672px and the content 1248px, roughly the one-third/two-thirds
+    # proportion most clip accounts use.
+    #
+    # Clamped to 0.2-0.8 at use: below that the face is unreadable on a
+    # phone, above it there is no point splitting at all.
+    split_facecam_fraction: float = 0.35
+
+    title_font_size: int = 13
+    # TikTok's top chrome (search, LIVE badge, Following/For You tabs) covers
+    # roughly the top 200px. Measured with a worst-case 70-character title
+    # that wraps to two lines: MarginV=30 starts it at 214px (clears by 14),
+    # 35 at 247px (clears by 47). 30 is the floor -- below it the banner
+    # renders behind the platform's navigation and the hook is lost.
+    title_margin_v: int = 30
+
     scene_detect_frame_skip: int = 4
 
     # --- Rendering / vertical crop (app/core/rendering_logic.py, app/core/face_detect.py) ---

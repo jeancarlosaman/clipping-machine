@@ -182,6 +182,46 @@ def classify_reaction_layout(
     return (near_left or near_right) and (near_top or near_bottom)
 
 
+def marked_rect_pixels(width: int, height: int, rect: dict) -> tuple[int, int, int, int]:
+    """(w, h, x, y) for a marked region, at its OWN aspect ratio.
+
+    Unlike crop_from_marked_rect, this does not grow the box towards a target
+    ratio -- it is for the fit-frame layout, which scales whatever it is given
+    to fit the output width over a blurred background and therefore does not
+    need a particular input shape. Keeping the region's own proportions is the
+    whole point there: it is the one layout that can show a wide gameplay
+    region in full, with nothing cropped away.
+
+    Raises ValueError on a malformed rect, same contract as
+    crop_from_marked_rect, so callers can fall back to the whole frame.
+    """
+    try:
+        x = float(rect["x"]) * width
+        y = float(rect["y"]) * height
+        w = float(rect["w"]) * width
+        h = float(rect["h"]) * height
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"malformed marked rect: {rect!r}") from exc
+
+    if w <= 0 or h <= 0 or width <= 0 or height <= 0:
+        raise ValueError(f"marked rect has no area: {rect!r}")
+
+    def _even_down(value: float) -> int:
+        return max(0, int(value) // 2 * 2)
+
+    def _even_up(value: float) -> int:
+        rounded = int(value)
+        if rounded < value:
+            rounded += 1
+        return max(2, rounded + (rounded % 2))
+
+    out_w = min(_even_up(w), _even_down(width))
+    out_h = min(_even_up(h), _even_down(height))
+    out_x = _even_down(min(max(0.0, x), width - out_w))
+    out_y = _even_down(min(max(0.0, y), height - out_h))
+    return out_w, out_h, out_x, out_y
+
+
 def crop_from_marked_rect(
     width: int,
     height: int,
@@ -362,21 +402,30 @@ def build_fit_frame_filtergraph(target_w: int, target_h: int) -> str:
 def build_split_reaction_filtergraph(
     cam_crop: tuple[int, int, int, int],
     main_crop: tuple[int, int, int, int],
-    half_w: int,
-    half_h: int,
+    out_w: int,
+    cam_out_h: int,
+    main_out_h: int | None = None,
 ) -> str:
     """ffmpeg `-filter_complex` graph for the top-facecam/bottom-content
     split layout: two independent crop+scale branches off the same source
-    frame (`[0:v]`), stacked vertically with ffmpeg's `vstack` filter. Both
-    branches must scale to the exact same `half_w`x`half_h` -- `vstack`
-    rejects mismatched input widths outright, and mismatched heights would
-    just distort proportions differently between halves.
+    frame (`[0:v]`), stacked vertically with ffmpeg's `vstack` filter.
+
+    Both branches must scale to the same WIDTH -- vstack rejects mismatched
+    widths outright. Their heights are independent, which is the point: a
+    50/50 split gives the webcam as much of the screen as the gameplay,
+    which is rarely what the clip is about. `main_out_h` defaults to
+    `cam_out_h` for the old equal-halves behaviour.
+
+    The caller is responsible for the two heights summing to the output
+    height and both being even (yuv420p chroma subsampling).
     """
+    if main_out_h is None:
+        main_out_h = cam_out_h
     cam_w, cam_h, cam_x, cam_y = cam_crop
     main_w, main_h, main_x, main_y = main_crop
     return (
-        f"[0:v]crop={cam_w}:{cam_h}:{cam_x}:{cam_y},scale={half_w}:{half_h},setsar=1[cam];"
-        f"[0:v]crop={main_w}:{main_h}:{main_x}:{main_y},scale={half_w}:{half_h},setsar=1[main];"
+        f"[0:v]crop={cam_w}:{cam_h}:{cam_x}:{cam_y},scale={out_w}:{cam_out_h},setsar=1[cam];"
+        f"[0:v]crop={main_w}:{main_h}:{main_x}:{main_y},scale={out_w}:{main_out_h},setsar=1[main];"
         f"[cam][main]vstack=inputs=2[vout]"
     )
 
@@ -402,7 +451,87 @@ def _format_srt_timestamp(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{ms:03d}"
 
 
-def build_srt(transcript_segments: list[dict], start: float, end: float) -> str:
+# Two lines at the default caption font size (~44 characters per line,
+# measured against a real libass render on a 1080x1920 frame). Callers that
+# have the app config pass settings.caption_max_chars instead; keeping the
+# default here is what lets this module stay free of a config import, which
+# is what makes it unit-testable with no app wiring.
+DEFAULT_CAPTION_MAX_CHARS = 80
+
+
+def split_caption_text(text: str, max_chars: int) -> list[str]:
+    """Break one transcript segment into caption-sized pieces.
+
+    Whisper emits a whole sentence per segment, so burning segments in
+    verbatim produced four-line paragraphs covering a third of the frame
+    (measured: 256px tall, 13.3% of a 1080x1920 clip). Short-form captions
+    want one or two short lines, replaced often.
+
+    Splits at the latest sentence boundary that fits, else the latest clause
+    boundary, else the latest space -- so a break lands where a reader would
+    pause rather than mid-thought. A single word longer than max_chars is
+    emitted whole rather than chopped: one slightly over-wide line beats an
+    unreadable fragment.
+    """
+    text = " ".join((text or "").split())
+    if not text:
+        return []
+    if len(text) <= max_chars:
+        return [text]
+
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > max_chars:
+        window = remaining[: max_chars + 1]
+        cut = -1
+        for group in ((". ", "! ", "? "), (", ", "; ", " -- "), (" ",)):
+            for mark in group:
+                found = window.rfind(mark)
+                if found > 0:
+                    # keep sentence/clause punctuation with the chunk it ends
+                    candidate = found + (len(mark) if mark != " " else 0)
+                    cut = max(cut, candidate)
+            if cut > 0:
+                break
+        if cut <= 0:
+            space = remaining.find(" ")
+            cut = space if space > 0 else len(remaining)
+        chunks.append(remaining[:cut].strip())
+        remaining = remaining[cut:].strip()
+    if remaining:
+        chunks.append(remaining)
+    return [c for c in chunks if c]
+
+
+def _timed_caption_chunks(
+    rel_start: float, rel_end: float, text: str, max_chars: int
+) -> list[tuple[float, float, str]]:
+    """Split `text` and share the segment's own duration between the pieces,
+    proportional to length -- a chunk twice as long stays up twice as long,
+    a decent proxy for how long it takes to say."""
+    chunks = split_caption_text(text, max_chars)
+    if len(chunks) <= 1:
+        return [(rel_start, rel_end, chunks[0])] if chunks else []
+
+    total_chars = sum(len(c) for c in chunks)
+    span = max(rel_end - rel_start, 0.001)
+    out: list[tuple[float, float, str]] = []
+    cursor = rel_start
+    for i, chunk in enumerate(chunks):
+        # The last chunk takes whatever is left, so rounding can never leave a
+        # gap or push the final caption past the segment's end.
+        chunk_end = rel_end if i == len(chunks) - 1 else min(cursor + span * (len(chunk) / total_chars), rel_end)
+        out.append((cursor, chunk_end, chunk))
+        cursor = chunk_end
+    return out
+
+
+def build_srt(
+    transcript_segments: list[dict],
+    start: float,
+    end: float,
+    max_chars: int = DEFAULT_CAPTION_MAX_CHARS,
+) -> str:
     """SRT subtitle content for the transcript slice covering [start, end],
     with timestamps shifted so 0 == the clip's own start. Returns "" if
     nothing in the window has text -- callers should skip the subtitles
@@ -430,10 +559,16 @@ def build_srt(transcript_segments: list[dict], start: float, end: float) -> str:
         return ""
 
     blocks = []
-    for idx, (rel_start, rel_end, text) in enumerate(entries, start=1):
-        blocks.append(
-            f"{idx}\n{_format_srt_timestamp(rel_start)} --> {_format_srt_timestamp(rel_end)}\n{text}\n"
-        )
+    idx = 0
+    for rel_start, rel_end, text in entries:
+        for chunk_start, chunk_end, chunk in _timed_caption_chunks(
+            rel_start, rel_end, text, max_chars
+        ):
+            idx += 1
+            blocks.append(
+                f"{idx}\n{_format_srt_timestamp(chunk_start)} --> "
+                f"{_format_srt_timestamp(chunk_end)}\n{chunk}\n"
+            )
     return "\n".join(blocks)
 
 
@@ -541,7 +676,11 @@ def retarget_source_label(filtergraph: str, new_label: str) -> str:
     return filtergraph.replace("[0:v]", f"[{new_label}]")
 
 
-def build_multipart_srt(transcript_segments: list[dict], parts: list[tuple[float, float]]) -> str:
+def build_multipart_srt(
+    transcript_segments: list[dict],
+    parts: list[tuple[float, float]],
+    max_chars: int = DEFAULT_CAPTION_MAX_CHARS,
+) -> str:
     """SRT content for a stitched clip: each part's transcript slice
     shifted onto the stitched timeline, where part N starts at the summed
     duration of all parts before it.
@@ -570,10 +709,16 @@ def build_multipart_srt(transcript_segments: list[dict], parts: list[tuple[float
         return ""
 
     blocks = []
-    for idx, (rel_start, rel_end, text) in enumerate(entries, start=1):
-        blocks.append(
-            f"{idx}\n{_format_srt_timestamp(rel_start)} --> {_format_srt_timestamp(rel_end)}\n{text}\n"
-        )
+    idx = 0
+    for rel_start, rel_end, text in entries:
+        for chunk_start, chunk_end, chunk in _timed_caption_chunks(
+            rel_start, rel_end, text, max_chars
+        ):
+            idx += 1
+            blocks.append(
+                f"{idx}\n{_format_srt_timestamp(chunk_start)} --> "
+                f"{_format_srt_timestamp(chunk_end)}\n{chunk}\n"
+            )
     return "\n".join(blocks)
 
 

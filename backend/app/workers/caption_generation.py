@@ -54,12 +54,21 @@ import uuid
 
 from app.core.caption_generation import generate_caption_annotation
 from app.db.models import CandidateSegment, RenderedClip, Transcript
-from app.workers.common import db_session, logger
+from app.workers.common import candidate_job_is_cancelled, db_session, logger
 
 
 def run(candidate_segment_id: str) -> None:
     log = logger.bind(candidate_segment_id=candidate_segment_id, worker="caption_generation")
     log.info("caption_generation.start")
+
+    # Cooperative cancel (see app.workers.common.job_is_cancelled): stop at
+    # this stage boundary instead of doing the work and enqueuing the next
+    # stage. Returning rather than raising keeps this out of the failure
+    # path -- a cancelled job is not a failed one, and must not burn retries
+    # or trip the on_failure callback.
+    if candidate_job_is_cancelled(candidate_segment_id):
+        log.info("caption_generation.cancelled")
+        return
 
     with db_session() as db:
         candidate = db.get(CandidateSegment, uuid.UUID(candidate_segment_id))

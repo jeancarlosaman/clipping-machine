@@ -99,3 +99,54 @@ def audio_object_key(stream_job_id: str) -> str:
     format/variant is ever needed, that's the trigger to add a real column.
     """
     return f"audio/{stream_job_id}/audio.wav"
+
+
+# --- cooperative cancellation -------------------------------------------
+#
+# A cancel request only sets stream_jobs.status = 'cancelled'; nothing kills a
+# running process. Every worker calls one of these at the top of its stage and
+# returns early if it is True, so the pipeline stops at the next stage boundary
+# with no half-written rows, no orphaned temp files and no partially muxed mp4.
+#
+# The trade-off, stated plainly: a job cancelled 30 seconds into a 7-minute
+# transcription still finishes that transcription before stopping. Killing the
+# subprocess would save those minutes at the cost of cleanup no longer being
+# guaranteed -- not worth it for a tool where the usual reason to cancel is
+# "wrong file" rather than "the building is on fire".
+#
+# Each check is its own short-lived session, deliberately: the status may have
+# changed since the worker's own session loaded the row.
+
+_CANCELLED_STATUS = "cancelled"
+
+
+def job_is_cancelled(stream_job_id) -> bool:
+    """True if this stream job has been cancelled."""
+    import uuid as _uuid
+
+    from app.db.models import StreamJob
+
+    job_id = stream_job_id if isinstance(stream_job_id, _uuid.UUID) else _uuid.UUID(str(stream_job_id))
+    with db_session() as db:
+        job = db.get(StreamJob, job_id)
+        return job is not None and job.status == _CANCELLED_STATUS
+
+
+def candidate_job_is_cancelled(candidate_segment_id) -> bool:
+    """Same check for the per-clip workers (rendering, caption generation),
+    which are handed a candidate_segment_id rather than the job id."""
+    import uuid as _uuid
+
+    from app.db.models import CandidateSegment, StreamJob
+
+    candidate_id = (
+        candidate_segment_id
+        if isinstance(candidate_segment_id, _uuid.UUID)
+        else _uuid.UUID(str(candidate_segment_id))
+    )
+    with db_session() as db:
+        candidate = db.get(CandidateSegment, candidate_id)
+        if candidate is None:
+            return False
+        job = db.get(StreamJob, candidate.stream_job_id)
+        return job is not None and job.status == _CANCELLED_STATUS

@@ -30,6 +30,8 @@ class StreamJobOut(BaseModel):
     # / StreamJob.gameplay_rect.
     facecam_rect: dict | None
     gameplay_rect: dict | None
+    # Per-job burn-in styling; see StreamJob.style_overrides.
+    style_overrides: dict | None
     retry_count: int
     last_error: str | None
     created_at: datetime

@@ -22,7 +22,7 @@ from app.core.queue import enqueue
 from app.core.storage import storage
 from app.db.models import StreamJob
 from app.workers import transcription
-from app.workers.common import audio_object_key, db_session, estimate_job_timeout_seconds, logger, run_subprocess
+from app.workers.common import audio_object_key, db_session, estimate_job_timeout_seconds, job_is_cancelled, logger, run_subprocess
 
 
 class PermanentIngestError(Exception):
@@ -75,6 +75,15 @@ def _extract_audio(local_video_path: str, local_audio_path: str) -> None:
 def run(stream_job_id: str) -> None:
     log = logger.bind(stream_job_id=stream_job_id, worker="ingest")
     log.info("ingest.start")
+
+    # Cooperative cancel (see app.workers.common.job_is_cancelled): stop at
+    # this stage boundary instead of doing the work and enqueuing the next
+    # stage. Returning rather than raising keeps this out of the failure
+    # path -- a cancelled job is not a failed one, and must not burn retries
+    # or trip the on_failure callback.
+    if job_is_cancelled(stream_job_id):
+        log.info("ingest.cancelled")
+        return
 
     with db_session() as db:
         job = db.get(StreamJob, uuid.UUID(stream_job_id))

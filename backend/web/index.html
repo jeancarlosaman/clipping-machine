@@ -9,29 +9,123 @@
 <body>
   <header>
     <h1>Clipping Machine <span class="muted">dev console</span></h1>
-    <div id="conn-status" class="pill pill-unknown">checking API…</div>
+    <div class="header-right">
+      <span id="signed-in-as" class="muted small"></span>
+      <button type="button" id="logout-btn" class="secondary small" hidden>Sign out</button>
+      <div id="conn-status" class="pill pill-unknown">checking API…</div>
+    </div>
   </header>
 
-  <section class="panel" id="token-panel">
-    <h2>1. Authenticate</h2>
-    <p class="muted">
-      No login flow exists yet — mint a dev token from a terminal in the repo:
-      <code>python scripts/create_dev_user.py you@example.com</code>, then paste it below.
-      It's saved in this browser only (localStorage), never sent anywhere but this API.
-    </p>
-    <div class="row">
-      <input id="token-input" type="text" placeholder="Bearer token" autocomplete="off" />
-      <button id="token-save">Save token</button>
-      <span id="token-status" class="muted"></span>
-    </div>
-  </section>
 
   <section class="panel">
-    <h2>2. Submit a VOD</h2>
+    <h2>1. Submit a VOD</h2>
     <div class="row">
       <input id="file-input" type="file" accept=".mp4,.mov,.mkv,.webm" />
-      <button id="upload-btn">Upload &amp; start pipeline</button>
+      <button id="upload-btn" class="upload-btn">Upload &amp; start pipeline</button>
     </div>
+
+    <!-- Framing, marked BEFORE upload. The frame comes from the chosen file
+         via a <video> + <canvas> in this browser -- no upload, no API call --
+         so the very first render is already framed correctly. -->
+    <div id="pre-framing" class="facecam-marker" hidden>
+      <h3 style="margin-top:0">Framing — mark what matters <span class="muted" style="text-transform:none;letter-spacing:0">(optional, but the biggest lever on clip quality)</span></h3>
+      <p class="muted small" style="margin:0 0 10px">
+        Scrub to a moment that shows your usual layout, then drag a box around each region.
+        <b style="color:var(--cam)">Facecam</b> becomes the top panel of the split layout;
+        <b style="color:var(--game)">gameplay</b> becomes the bottom panel — or, if you are not
+        splitting, the exact region the vertical crop is taken from. Marking either one turns off
+        the guessing for it.
+      </p>
+
+      <div class="row" style="align-items:center;gap:10px;margin-bottom:10px">
+        <input type="range" id="pf-scrub" min="0" max="100" value="0" step="1" style="flex:1;min-width:220px;accent-color:var(--silver)" />
+        <span class="mono muted" id="pf-time">0:00</span>
+      </div>
+
+      <div class="row facecam-modes">
+        <span class="muted small">Now marking:</span>
+        <button type="button" class="mode-btn active" id="pf-mode-facecam">Facecam</button>
+        <button type="button" class="mode-btn" id="pf-mode-gameplay">Gameplay / content</button>
+        <span class="spacer" style="flex:1"></span>
+        <button type="button" class="secondary small" id="pf-clear">Clear boxes</button>
+      </div>
+
+      <div class="facecam-canvas" id="pf-canvas-wrap">
+        <canvas id="pf-canvas"></canvas>
+        <div id="pf-live" class="facecam-box" hidden></div>
+      </div>
+
+      <div class="row" style="margin-top:10px;gap:8px;align-items:center">
+        <input type="text" id="pf-setup-name" placeholder="Save this as a setup, e.g. Main rig — cam bottom right" style="flex:1;min-width:260px" />
+        <button type="button" class="secondary small" id="pf-save-setup">Save setup</button>
+        <select id="pf-setups" class="account-select" style="min-width:200px"><option value="">Load a saved setup…</option></select>
+      </div>
+      <div class="small muted" id="pf-status" style="margin-top:8px">No file chosen yet.</div>
+    </div>
+
+    <!-- Live layout preview. Positions are derived from real libass
+         measurements (see LAYOUT_METRICS in app.js), so what is drawn here
+         tracks what ffmpeg actually produces rather than being decorative. -->
+    <div id="layout-editor" class="facecam-marker">
+      <h3 style="margin-top:0">Layout &amp; text — see it before you render</h3>
+      <p class="muted small" style="margin:0 0 12px">
+        Drag the sliders and watch the phone. The shaded bands are the areas TikTok covers with its
+        own UI in the feed — anything under them is rendered but invisible to a viewer.
+      </p>
+
+      <div class="layout-editor-grid">
+        <div class="phone-wrap">
+          <div class="phone" id="phone">
+            <div class="phone-cam" id="ph-cam"><span>facecam</span></div>
+            <div class="phone-game" id="ph-game"><span>gameplay / content</span></div>
+            <div class="phone-title" id="ph-title">He Just Got BLASTED From Behind!</div>
+            <div class="phone-caption" id="ph-caption">I shot guys up down a box. You're right.</div>
+            <div class="safe-zones" id="ph-zones">
+              <div class="safe-zone safe-zone-top"></div>
+              <div class="safe-zone safe-zone-bottom"></div>
+              <div class="safe-zone safe-zone-left"></div>
+              <div class="safe-zone safe-zone-right"></div>
+            </div>
+          </div>
+          <label class="safe-zone-toggle">
+            <input type="checkbox" id="ph-show-zones" checked />
+            Show TikTok safe zones
+          </label>
+        </div>
+
+        <div class="layout-controls">
+          <label>
+            Facecam / gameplay split <output id="out-split"></output>
+            <input type="range" id="sty-split" min="0.2" max="0.8" step="0.01" />
+          </label>
+          <label>
+            Caption size <output id="out-capsize"></output>
+            <input type="range" id="sty-capsize" min="5" max="20" step="1" />
+          </label>
+          <label>
+            Caption height off the bottom <output id="out-capmargin"></output>
+            <input type="range" id="sty-capmargin" min="50" max="200" step="1" />
+          </label>
+          <label>
+            Max characters per caption <output id="out-capchars"></output>
+            <input type="range" id="sty-capchars" min="20" max="200" step="5" />
+          </label>
+          <label>
+            Title size <output id="out-titlesize"></output>
+            <input type="range" id="sty-titlesize" min="6" max="30" step="1" />
+          </label>
+          <label>
+            Title height from the top <output id="out-titlemargin"></output>
+            <input type="range" id="sty-titlemargin" min="30" max="200" step="1" />
+          </label>
+          <div class="row" style="gap:8px;margin-top:6px">
+            <button type="button" class="secondary small" id="sty-reset">Reset to defaults</button>
+          </div>
+          <div class="small" id="sty-warnings" style="margin-top:8px"></div>
+        </div>
+      </div>
+    </div>
+
     <details id="upload-options">
       <summary>Options (model, clip count, length, score bar)</summary>
       <div class="row">
@@ -103,7 +197,7 @@
   </section>
 
   <section class="panel">
-    <h2>3. Jobs <span id="jobs-count" class="muted"></span></h2>
+    <h2>2. Jobs <span id="jobs-count" class="muted"></span></h2>
     <div class="row">
       <button id="refresh-jobs-btn">Refresh now</button>
       <label class="muted"><input type="checkbox" id="auto-refresh" checked /> auto-refresh every 3s</label>
@@ -161,6 +255,46 @@
     <h3>Clips</h3>
     <p class="muted" id="clips-empty-note"></p>
     <div id="clips-list"></div>
+  </section>
+
+  <section class="panel" id="llm-panel">
+    <h2>3. AI model</h2>
+    <p class="muted small" style="margin-top:0">
+      Which model reads your transcript to find clip-worthy moments and write titles. This is the
+      biggest single lever on clip quality — a local 8B model on CPU is noticeably weaker at judging
+      what is actually interesting than a hosted one.
+      <br>Segment analysis runs <b>once per VOD</b>, so the API cost of the good option is cents.
+    </p>
+
+    <div class="row" style="gap:20px;align-items:flex-start">
+      <label class="radio-card">
+        <input type="radio" name="llm-provider" value="ollama" id="llm-ollama" />
+        <span><b>Local (Ollama)</b><br><span class="muted small" id="llm-ollama-desc">free, private, slower</span></span>
+      </label>
+      <label class="radio-card">
+        <input type="radio" name="llm-provider" value="openai" id="llm-openai" />
+        <span><b>OpenAI API</b><br><span class="muted small" id="llm-openai-desc">better selection, costs per use</span></span>
+      </label>
+    </div>
+
+    <div id="llm-key-row" style="margin-top:14px">
+      <label style="width:100%">
+        Your OpenAI API key
+        <span class="muted small" id="llm-key-state"></span>
+        <input type="password" id="llm-key" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+      </label>
+      <p class="muted small" style="margin:6px 0 0">
+        Encrypted before it is stored, and never sent back to this page — only the last four
+        characters are shown so you can tell keys apart. Leave blank to keep the current key;
+        use Remove to delete it.
+      </p>
+      <div class="row" style="gap:8px;margin-top:10px">
+        <button type="button" id="llm-save">Save</button>
+        <button type="button" class="secondary" id="llm-remove-key">Remove key</button>
+        <span class="muted small" id="llm-status"></span>
+      </div>
+    </div>
+    <p class="muted small" id="llm-note" style="margin-top:12px"></p>
   </section>
 
   <section class="panel">

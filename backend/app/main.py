@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app.api.errors import register_exception_handlers
-from app.api.routers import clips, creator_accounts, stream_jobs, upload_tasks
+from app.api.routers import auth, clips, creator_accounts, settings as settings_router, stream_jobs, upload_tasks
 from app.core.logging import configure_logging
 
 configure_logging()
@@ -20,6 +20,8 @@ app = FastAPI(
 
 register_exception_handlers(app)
 
+app.include_router(auth.router)
+app.include_router(settings_router.router)
 app.include_router(stream_jobs.router)
 app.include_router(clips.router)
 app.include_router(upload_tasks.router)

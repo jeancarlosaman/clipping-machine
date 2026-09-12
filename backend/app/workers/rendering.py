@@ -104,6 +104,7 @@ from app.core.config import settings
 from app.core.face_detect import estimate_face_profile
 from app.core.rendering_logic import (
     crop_from_marked_rect,
+    marked_rect_pixels,
     append_subtitles_stage,
     build_concat_prefix,
     build_fit_frame_filtergraph,
@@ -123,7 +124,7 @@ from app.core.rendering_logic import (
 from app.core.storage import new_object_key, storage
 from app.core.thumbnail_selection import pick_best_frame
 from app.db.models import CandidateSegment, RenderedClip, StreamJob, Transcript
-from app.workers.common import db_session, logger, run_subprocess
+from app.workers.common import candidate_job_is_cancelled, db_session, logger, run_subprocess
 
 # Fractions of a clip's own [start, end] window to sample for face
 # detection -- not the whole source video, just this clip's slice, so the
@@ -174,9 +175,11 @@ TARGET_HEIGHT = 1920
 # on TikTok shows the caption clipped by or fighting the platform's own
 # UI, move this back up (a bigger MarginV number) rather than pushing it
 # any further down.
-# Not user-configurable yet -- one hardcoded style is the MVP default,
-# per-clip caption styling is a later-research item, not required for "a
-# human can review one clip".
+# Sizes and margins now live in app/core/config.py (caption_font_size,
+# caption_margin_v, title_font_size, title_margin_v) so they are tunable
+# from .env without a code change -- each carries the measured numbers and
+# the safe floor in its comment there. Per-CLIP styling is still a
+# later-research item; this is one style for every clip.
 # MarginV=55 (was 28) -- 2026-09-11. The two previous "move it lower"
 # adjustments (60 -> 40 -> 28) walked the caption band INTO TikTok's own
 # bottom UI. Researched TikTok's safe zones and then measured this exact
@@ -194,10 +197,11 @@ TARGET_HEIGHT = 1920
 # actually after. Do not push this below 50 without re-measuring: the
 # preview in the dev console shows the raw clip, which is exactly why this
 # regression was invisible for three iterations.
-_CAPTION_STYLE = (
-    "FontSize=10,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
-    "BorderStyle=1,Outline=1.5,Shadow=0,Alignment=2,MarginV=55"
-)
+def _caption_style(style: dict) -> str:
+    return (
+        f"FontSize={style['caption_font_size']},PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
+        f"BorderStyle=1,Outline=1.5,Shadow=0,Alignment=2,MarginV={style['caption_margin_v']}"
+    )
 
 # The clickbait title banner -- bigger and bolder than the transcript
 # captions above (this is the "headline" a viewer reads first, not
@@ -251,10 +255,34 @@ _CAPTION_STYLE = (
 # The banner is the first thing a viewer is supposed to read, so having its
 # top third behind the platform's own navigation was costing exactly the
 # hook the title exists to deliver.
-_TITLE_STYLE = (
-    "FontSize=13,Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
-    "BorderStyle=1,Outline=2,Shadow=0,Alignment=6,MarginV=35"
-)
+def _title_style(style: dict) -> str:
+    return (
+        f"FontSize={style['title_font_size']},Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
+        f"BorderStyle=1,Outline=2,Shadow=0,Alignment=6,MarginV={style['title_margin_v']}"
+    )
+
+
+def resolve_style(overrides: dict | None) -> dict:
+    """This job's burn-in styling: settings.* defaults with any per-job
+    override laid over the top.
+
+    Values are already range-checked by the API (STYLE_OVERRIDE_BOUNDS), but
+    a row could also have been written by an older client or edited by hand,
+    so unknown keys are ignored here rather than trusted -- a bad style
+    should cost the clip its styling, never the render.
+    """
+    resolved = {
+        "split_facecam_fraction": settings.split_facecam_fraction,
+        "caption_font_size": settings.caption_font_size,
+        "caption_margin_v": settings.caption_margin_v,
+        "caption_max_chars": settings.caption_max_chars,
+        "title_font_size": settings.title_font_size,
+        "title_margin_v": settings.title_margin_v,
+    }
+    for key, value in (overrides or {}).items():
+        if key in resolved and isinstance(value, (int, float)):
+            resolved[key] = value
+    return resolved
 
 
 def _probe_video_dimensions(local_path: str) -> tuple[int, int]:
@@ -305,8 +333,13 @@ def _render(
     filtergraph: str,
     srt_path: str | None,
     title_srt_path: str | None,
+    style: dict,
     parts: list[tuple[float, float]] | None = None,
 ) -> None:
+    # `style` is REQUIRED, not defaulted: caption/title sizing became
+    # per-job (StreamJob.style_overrides), and a default here would let a
+    # caller silently render with the wrong styling instead of failing
+    # loudly at the call site.
     # -filter_complex (not the simpler -vf) because the split-reaction
     # layout needs a branching graph (two crops off the same source frame,
     # merged with vstack) that -vf's linear-chain-only syntax can't express
@@ -319,14 +352,14 @@ def _render(
     # track.
     graph = filtergraph
     if srt_path is not None:
-        graph = append_subtitles_stage(graph, srt_path, _CAPTION_STYLE)
+        graph = append_subtitles_stage(graph, srt_path, _caption_style(style))
     if title_srt_path is not None:
         # Chained as its own subtitles stage (not merged into the same SRT
         # as the transcript captions) so it can use a completely different
         # style/position (_TITLE_STYLE's top alignment vs _CAPTION_STYLE's
         # bottom) -- append_subtitles_stage already handles relabeling
         # [vout]->[vpre] correctly however many times it's chained.
-        graph = append_subtitles_stage(graph, title_srt_path, _TITLE_STYLE)
+        graph = append_subtitles_stage(graph, title_srt_path, _title_style(style))
 
     if parts:
         # Stitched multi-part clip: cut each part out with trim/atrim and
@@ -459,6 +492,15 @@ def run(candidate_segment_id: str) -> None:
     log = logger.bind(candidate_segment_id=candidate_segment_id, worker="rendering")
     log.info("rendering.start")
 
+    # Cooperative cancel (see app.workers.common.job_is_cancelled): stop at
+    # this stage boundary instead of doing the work and enqueuing the next
+    # stage. Returning rather than raising keeps this out of the failure
+    # path -- a cancelled job is not a failed one, and must not burn retries
+    # or trip the on_failure callback.
+    if candidate_job_is_cancelled(candidate_segment_id):
+        log.info("rendering.cancelled")
+        return
+
     with db_session() as db:
         candidate = db.get(CandidateSegment, uuid.UUID(candidate_segment_id))
         if candidate is None:
@@ -487,10 +529,14 @@ def run(candidate_segment_id: str) -> None:
         job = db.get(StreamJob, candidate.stream_job_id)
         raw_object_key = job.raw_object_key
         stream_job_id = job.id
+        # Captured here, while the session is open -- the job is detached
+        # by the time the caption call below needs it.
+        job_user_id = job.user_id
         camera_layout_mode = job.camera_layout_mode  # None ("auto") | single_crop | split_reaction | fit_frame
         crop_bias = job.crop_bias
         facecam_rect = job.facecam_rect
-        gameplay_rect = job.gameplay_rect  # None | "left" | "center" | "right" -- see compute_crop_offset
+        gameplay_rect = job.gameplay_rect
+        style = resolve_style(job.style_overrides)  # None | "left" | "center" | "right" -- see compute_crop_offset
 
         transcript = db.query(Transcript).filter_by(stream_job_id=job.id).one_or_none()
         transcript_segments = list(transcript.segments) if transcript else []
@@ -557,11 +603,20 @@ def run(candidate_segment_id: str) -> None:
         # deliberately ignores enable_reaction_split_layout and face
         # detection entirely: there's nothing to classify when no cropping
         # happens, so neither can change the outcome.
-        # The split layout's top panel, needed up front because a
-        # hand-marked facecam rect is resolved against its aspect ratio
+        # The split layout's two panels, needed up front because a
+        # hand-marked rect is resolved against its panel's aspect ratio
         # before the layout decision below, not inside it.
-        half_w, half_h = TARGET_WIDTH, TARGET_HEIGHT // 2
-        half_ratio = half_w / half_h
+        #
+        # Not halves any more: settings.split_facecam_fraction decides how
+        # much height the facecam gets, and the content panel takes the rest.
+        # Both must be even (yuv420p) and must sum to TARGET_HEIGHT exactly,
+        # or vstack produces an output that is not 1080x1920.
+        panel_w = TARGET_WIDTH
+        cam_fraction = min(max(style['split_facecam_fraction'], 0.2), 0.8)
+        cam_panel_h = int(TARGET_HEIGHT * cam_fraction) // 2 * 2
+        main_panel_h = TARGET_HEIGHT - cam_panel_h  # even, since both TARGET_HEIGHT and cam_panel_h are
+        cam_ratio = panel_w / cam_panel_h
+        main_ratio = panel_w / main_panel_h
 
         # A facecam box the creator drew on a real frame of this VOD
         # (StreamJob.facecam_rect) outranks everything automatic: no Haar
@@ -576,7 +631,7 @@ def run(candidate_segment_id: str) -> None:
         manual_cam_crop = None
         if facecam_rect:
             try:
-                manual_cam_crop = crop_from_marked_rect(width, height, facecam_rect, half_ratio)
+                manual_cam_crop = crop_from_marked_rect(width, height, facecam_rect, cam_ratio)
             except ValueError as exc:
                 log.warning("rendering.facecam_rect_invalid", error=str(exc), rect=facecam_rect)
 
@@ -590,7 +645,7 @@ def run(candidate_segment_id: str) -> None:
         manual_full_crop = None
         if gameplay_rect:
             try:
-                manual_main_crop = crop_from_marked_rect(width, height, gameplay_rect, half_ratio)
+                manual_main_crop = crop_from_marked_rect(width, height, gameplay_rect, main_ratio)
                 manual_full_crop = crop_from_marked_rect(
                     width, height, gameplay_rect, TARGET_WIDTH / TARGET_HEIGHT
                 )
@@ -634,10 +689,30 @@ def run(candidate_segment_id: str) -> None:
             crop_bias=crop_bias or "none",
             facecam_source=("marked" if manual_cam_crop is not None else "detected" if face_profile else "none"),
             gameplay_source=("marked" if manual_main_crop is not None else "auto"),
+            split_panels=f"{cam_panel_h}/{main_panel_h}",
         )
 
         if is_fit_frame_layout:
             filtergraph = build_fit_frame_filtergraph(TARGET_WIDTH, TARGET_HEIGHT)
+            # "Show the whole frame" used to mean literally the whole source
+            # frame, which made it the one layout that ignored a marked
+            # gameplay region -- and the only one that could have honoured a
+            # WIDE one completely. A 16:9-ish region cannot fit inside a 9:16
+            # crop (single_crop necessarily cuts its sides), but fit_frame
+            # scales rather than crops, so the marked region survives intact.
+            # With a mark, "whole frame" becomes "the whole of the part you
+            # said matters" -- which is what someone who drew the box meant.
+            if gameplay_rect:
+                try:
+                    src = marked_rect_pixels(width, height, gameplay_rect)
+                except ValueError as exc:
+                    log.warning("rendering.gameplay_rect_invalid", error=str(exc), rect=gameplay_rect)
+                else:
+                    crop_w, crop_h, crop_x, crop_y = src
+                    filtergraph = (
+                        f"[0:v]crop={crop_w}:{crop_h}:{crop_x}:{crop_y}[fitsrc];"
+                        + retarget_source_label(filtergraph, "fitsrc")  # bare label: the helper adds the brackets
+                    )
         elif is_reaction_layout:
             # Top: a tight zoom on the detected facecam. Bottom: the full
             # frame, plain-cropped to the same half-height target ratio --
@@ -647,15 +722,17 @@ def run(candidate_segment_id: str) -> None:
                 cam_crop = manual_cam_crop
             else:
                 face_scale = face_profile["area"] ** 0.5
-                cam_crop = compute_face_zoom_crop(width, height, face_profile["center"], face_scale, half_ratio)
+                cam_crop = compute_face_zoom_crop(width, height, face_profile["center"], face_scale, cam_ratio)
             if manual_main_crop is not None:
                 main_w, main_h, main_x, main_y = manual_main_crop
             else:
-                main_w, main_h = compute_vertical_crop(width, height, target_ratio=half_ratio)
+                main_w, main_h = compute_vertical_crop(width, height, target_ratio=main_ratio)
                 main_x, main_y = compute_crop_offset(
                     width, height, main_w, main_h, focal_point=None, bias=crop_bias
                 )
-            filtergraph = build_split_reaction_filtergraph(cam_crop, (main_w, main_h, main_x, main_y), half_w, half_h)
+            filtergraph = build_split_reaction_filtergraph(
+                cam_crop, (main_w, main_h, main_x, main_y), panel_w, cam_panel_h, main_panel_h
+            )
         else:
             if manual_full_crop is not None:
                 # An explicitly marked content region beats both face
@@ -673,9 +750,9 @@ def run(candidate_segment_id: str) -> None:
         # sum of the earlier parts' durations, not at its original source
         # timestamp (see build_multipart_srt).
         srt_content = (
-            build_multipart_srt(transcript_segments, parts)
+            build_multipart_srt(transcript_segments, parts, max_chars=int(style['caption_max_chars']))
             if parts
-            else build_srt(transcript_segments, start, end)
+            else build_srt(transcript_segments, start, end, max_chars=int(style['caption_max_chars']))
         )
         srt_path = None
         if srt_content:
@@ -688,7 +765,12 @@ def run(candidate_segment_id: str) -> None:
         # synchronously, rather than after rendering, specifically so the
         # title text is known in time to burn into the clip below. See the
         # module docstring for why this moved earlier.
-        annotation = generate_caption_annotation(transcript_segments, start, end, score_breakdown, existing_caption)
+        from app.core.llm_config import resolve_llm_config_for_user_id
+
+        annotation = generate_caption_annotation(
+            transcript_segments, start, end, score_breakdown, existing_caption,
+            llm_config=resolve_llm_config_for_user_id(job_user_id),
+        )
         log.info("rendering.annotation_generated", source=annotation["source"])
 
         title_srt_path = None
@@ -703,7 +785,8 @@ def run(candidate_segment_id: str) -> None:
         flag_reasons: list[str] = []
         try:
             _render(
-                local_video_path, out_path, start, end, filtergraph, srt_path, title_srt_path, parts=parts
+                local_video_path, out_path, start, end, filtergraph,
+                srt_path, title_srt_path, style, parts=parts,
             )
         except RuntimeError as exc:
             if srt_path is None and title_srt_path is None:
@@ -721,7 +804,10 @@ def run(candidate_segment_id: str) -> None:
             if title_srt_path is not None:
                 flag_reasons.append("title_failed")
             try:
-                _render(local_video_path, out_path, start, end, filtergraph, None, None, parts=parts)
+                _render(
+                    local_video_path, out_path, start, end, filtergraph,
+                    None, None, style, parts=parts,
+                )
             except RuntimeError as exc2:
                 _mark_failed(clip_id, f"ffmpeg render failed (with and without burned-in text): {exc2}")
                 log.error("rendering.permanent_failure", error=str(exc2))

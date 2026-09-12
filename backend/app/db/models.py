@@ -38,6 +38,11 @@ stream_job_status_enum = Enum(
     "scoring", "scored", "failed_scoring",
     "rendering", "ready_for_review", "failed_rendering",
     "archived",
+    # Set by POST /stream-jobs/{id}/cancel. Cooperative: workers check it at
+    # the top of each stage (see app.workers.common.job_is_cancelled) and
+    # stop rather than being killed mid-run, so a job halts at the next
+    # stage boundary with nothing left half-written.
+    "cancelled",
     name="stream_job_status",
 )
 
@@ -73,6 +78,17 @@ class User(Base):
     email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
     display_name: Mapped[str | None] = mapped_column(String)
+
+    # --- per-account LLM configuration (app/core/llm_config.py) ---
+    # "openai" | "ollama" | None. None means "use settings.caption_llm_provider",
+    # which is how every account behaved before this existed.
+    llm_provider: Mapped[str | None] = mapped_column(String)
+    # Encrypted with app.core.crypto (Fernet), same as creator_accounts'
+    # TikTok tokens. This key can spend the holder's money, so it is never
+    # stored in plaintext and never returned by the API -- the settings
+    # endpoint reports only whether one is set and its last four characters.
+    openai_api_key_encrypted: Mapped[str | None] = mapped_column(Text)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -202,6 +218,14 @@ class StreamJob(Base):
     # Null = behave exactly as before (center/face-driven crop of the whole
     # frame).
     gameplay_rect: Mapped[dict | None] = mapped_column(JSONB)
+
+    # Per-job burn-in styling, set from the console's phone preview:
+    #   {"split_facecam_fraction": 0.35, "caption_font_size": 8,
+    #    "caption_margin_v": 55, "title_font_size": 13, "title_margin_v": 30}
+    # Any subset is valid -- missing keys fall back to the settings.* default,
+    # and null (every job predating this) means "all defaults", so nothing
+    # about existing behaviour changes.
+    style_overrides: Mapped[dict | None] = mapped_column(JSONB)
 
     # Scene-cut timestamps (seconds) detected once by segmentation.py and
     # persisted here so scoring.py can reuse them instead of re-downloading

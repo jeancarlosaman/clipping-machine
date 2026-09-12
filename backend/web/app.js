@@ -55,24 +55,98 @@ let creatorAccountsCache = [];
 let autoRefreshTimer = null;
 let lastRenderedClipsSignature = null;
 
-// ---- token handling ----
+// ---- session ----
+//
+// Auth is a real login now (app/api/routers/auth.py). The browser holds an
+// httpOnly session cookie, which JavaScript deliberately cannot read -- so
+// there is nothing to store here and nothing an XSS bug could steal. Every
+// request just carries the cookie automatically.
+//
+// getToken() survives for one reason: a bearer token pasted into
+// localStorage by hand still works, which keeps scripts, curl and the
+// README examples usable against the same API.
+
+let currentUser = null;
 
 function getToken() {
-  return localStorage.getItem(TOKEN_KEY) || "";
+  try {
+    return localStorage.getItem(TOKEN_KEY) || "";
+  } catch {
+    return ""; // storage disabled -- the cookie is doing the work anyway
+  }
 }
 
-function setToken(token) {
-  localStorage.setItem(TOKEN_KEY, token);
-  $("#token-status").textContent = token ? "saved" : "";
+/**
+ * Gate the console on a real session.
+ *
+ * Returns true when signed in. On 401 it sends the browser to the login
+ * page and returns false, so the caller must stop -- otherwise every
+ * subsequent request fires and 401s during the redirect.
+ *
+ * With dev auto-login enabled server-side this simply succeeds and no login
+ * page is ever seen, which is the point: local dev keeps its zero-friction
+ * flow while a deployed instance is properly gated.
+ */
+async function requireAuth() {
+  let resp;
+  try {
+    resp = await fetch(`${API_BASE}/api/v1/auth/me`, {
+      headers: getToken() ? { Authorization: `Bearer ${getToken()}` } : {},
+    });
+  } catch {
+    // The API is unreachable. Redirecting to the login page would just show
+    // a form that also cannot reach it, so stay put and say what is wrong.
+    // Setting the pill directly rather than calling a helper: this runs
+    // before anything else and must not depend on other startup code.
+    const pill = $("#conn-status");
+    if (pill) {
+      pill.textContent = "API unreachable — is uvicorn running?";
+      pill.className = "pill pill-err";
+    }
+    return false;
+  }
+
+  if (resp.status === 401) {
+    window.location.href = "/login.html";
+    return false;
+  }
+  if (!resp.ok) return false;
+
+  currentUser = await resp.json();
+  const devBypass = currentUser.auth_source === "dev_auto_login";
+
+  const label = $("#signed-in-as");
+  if (label) {
+    label.textContent = devBypass ? `${currentUser.email} (dev auto-login)` : currentUser.email;
+    label.title = devBypass
+      ? "DEV_AUTO_LOGIN_EMAIL is set in .env, so the API accepts every request as this user and " +
+        "ignores cookies. Comment it out and restart the API to use real logins."
+      : "";
+  }
+  // Sign out cannot work under dev auto-login -- it clears a cookie the
+  // server is not consulting. Hiding the button is more honest than offering
+  // one that appears to do nothing.
+  const btn = $("#logout-btn");
+  if (btn) btn.hidden = devBypass;
+  return true;
 }
 
-function initTokenPanel() {
-  $("#token-input").value = getToken();
-  $("#token-status").textContent = getToken() ? "saved" : "";
-  $("#token-save").addEventListener("click", () => {
-    setToken($("#token-input").value.trim());
-    refreshAll();
-  });
+async function logout() {
+  try {
+    await fetch(`${API_BASE}/api/v1/auth/logout`, { method: "POST" });
+  } catch {
+    /* even if the call fails, clear local state and send them to the form */
+  }
+  try {
+    localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* nothing to clear */
+  }
+  window.location.href = "/login.html";
+}
+
+function initSessionUi() {
+  $("#logout-btn")?.addEventListener("click", logout);
 }
 
 // ---- fetch helper ----
@@ -165,12 +239,19 @@ async function loadJobs() {
       <td class="muted">${escapeHtml(job.last_error || "")}</td>
       <td>
         <button class="secondary view-btn" data-job-id="${job.id}">View</button>
+        ${isJobRunning(job.status)
+          ? `<button class="secondary cancel-job-btn" data-job-id="${job.id}" title="Stop this job at its next stage boundary">Cancel</button>`
+          : ""}
         <button class="secondary danger delete-job-btn" data-job-id="${job.id}" title="Delete this upload and its clips">🗑</button>
       </td>
     `;
     tr.querySelector(".view-btn").addEventListener("click", (e) => {
       e.stopPropagation();
       selectJob(job.id);
+    });
+    tr.querySelector(".cancel-job-btn")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      cancelJob(job.id);
     });
     tr.querySelector(".delete-job-btn").addEventListener("click", (e) => {
       e.stopPropagation();
@@ -406,6 +487,36 @@ function initFacecamMarker() {
   window.addEventListener("resize", renderMarkedBoxes);
 }
 
+// Terminal statuses -- the work is over, so there is nothing to cancel and
+// no Cancel button worth showing. Mirrors TERMINAL_JOB_STATUSES in
+// app/api/routers/stream_jobs.py; the API refuses the call either way, this
+// just avoids offering a button that can only fail.
+const TERMINAL_JOB_STATUSES = new Set([
+  "ready_for_review", "archived", "cancelled",
+  "failed_ingest", "failed_transcription", "failed_segmentation",
+  "failed_scoring", "failed_rendering",
+]);
+
+function isJobRunning(status) {
+  return !TERMINAL_JOB_STATUSES.has(status);
+}
+
+async function cancelJob(jobId) {
+  if (!confirm(
+    "Cancel this job?\n\nIt stops at the next stage boundary, so whatever is running " +
+    "right now (a transcription pass, a render) finishes first — that can take a few " +
+    "minutes on a long VOD. Clips already rendered are kept."
+  )) return;
+  try {
+    await apiFetch(`/api/v1/stream-jobs/${jobId}/cancel`, { method: "POST" });
+    showToast("Cancelling — the current stage will finish, then the job stops.");
+    await loadJobs();
+    if (selectedJobId === jobId) await loadJobDetail();
+  } catch {
+    /* toast already shown */
+  }
+}
+
 async function loadJobDetail() {
   if (!selectedJobId) return;
   let job;
@@ -562,7 +673,7 @@ function renderClipCard(clip) {
     <div class="clip-preview"></div>
     <div class="row" style="margin-top:0.5rem">
       ${hasVideo
-        ? '<button class="secondary preview-btn">▶ Watch clip</button><button class="secondary download-btn">⬇ Download</button>'
+        ? '<button class="secondary preview-btn">▶ Watch clip</button><button class="secondary download-btn">⬇ Download clip</button>'
         : '<span class="muted">no rendered video yet</span>'}
       <button class="approve-btn">Approve</button>
       <button class="secondary reject-btn">Reject</button>
@@ -600,6 +711,18 @@ function renderClipCard(clip) {
   if (hasVideo) {
     card.querySelector(".preview-btn").addEventListener("click", () => loadClipVideo(clip.id, previewEl));
     card.querySelector(".download-btn").addEventListener("click", (e) => downloadClipVideo(clip, e.target));
+  }
+  // Separate from hasVideo: the thumbnail is its own artifact and is worth
+  // offering on its own -- it is the cover image for a manual upload, and a
+  // clip can have one even when the mp4 is gone.
+  if (clip.thumbnail_key) {
+    const thumbBtn = document.createElement("button");
+    thumbBtn.className = "secondary download-thumb-btn";
+    thumbBtn.textContent = "⬇ Thumbnail";
+    thumbBtn.addEventListener("click", (e) => downloadClipThumbnail(clip, e.target));
+    const row = card.querySelector(".preview-btn")?.parentElement
+      || card.querySelector(".clip-preview")?.parentElement;
+    if (row) row.appendChild(thumbBtn);
   }
 
   const resultEl = card.querySelector(".review-result");
@@ -791,20 +914,31 @@ async function loadClipVideo(clipId, container) {
 // trick since a plain <a href> can't carry the Authorization header; the
 // download itself happens via a throwaway <a download> anchor, which is the
 // standard way to save a blob without navigating the page away from it.
-async function downloadClipVideo(clip, buttonEl) {
+// Filename from the clip's own title, so a folder of downloads is readable
+// instead of 24 UUIDs. Falls back to the id when there is no usable title.
+function clipFilenameBase(clip) {
+  return (
+    (clip.caption_title || clip.id)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 60) || clip.id
+  );
+}
+
+// Shared by the mp4 and thumbnail buttons. Both need the same
+// authenticated-blob dance: a plain <a href> can't carry the bearer header
+// the API requires, so the bytes are fetched first and saved from a local
+// object URL.
+async function downloadClipMedia(clip, buttonEl, { path, extension, label }) {
   const originalText = buttonEl.textContent;
   buttonEl.textContent = "Downloading…";
   buttonEl.disabled = true;
   try {
-    const url = await fetchMediaBlobUrl(`/api/v1/clips/${clip.id}/video`);
-    const filenameBase = (clip.caption_title || clip.id)
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 60) || clip.id;
+    const url = await fetchMediaBlobUrl(`/api/v1/clips/${clip.id}/${path}`);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${filenameBase}.mp4`;
+    a.download = `${clipFilenameBase(clip)}.${extension}`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -812,11 +946,19 @@ async function downloadClipVideo(clip, buttonEl) {
     // revoking immediately can race the browser's own read of it.
     setTimeout(() => URL.revokeObjectURL(url), 5000);
   } catch (err) {
-    showToast(`Could not download clip: ${err.message}`);
+    showToast(`Could not download ${label}: ${err.message}`);
   } finally {
     buttonEl.textContent = originalText;
     buttonEl.disabled = false;
   }
+}
+
+function downloadClipVideo(clip, buttonEl) {
+  return downloadClipMedia(clip, buttonEl, { path: "video", extension: "mp4", label: "clip" });
+}
+
+function downloadClipThumbnail(clip, buttonEl) {
+  return downloadClipMedia(clip, buttonEl, { path: "thumbnail", extension: "jpg", label: "thumbnail" });
 }
 
 async function reviewClip(clipId, decision, resultEl, rating = null, notes = null) {
@@ -915,6 +1057,550 @@ function appendOptionalFormFields(form) {
   stringField("#opt-max-clip-len", "max_clip_seconds");
   stringField("#opt-camera-layout", "camera_layout_mode");
   stringField("#opt-crop-bias", "crop_bias");
+
+  // Framing marked in the browser before upload. Multipart has no nested
+  // objects, so each region goes as a JSON string; the API parses them with
+  // the same model its JSON endpoint uses (see _parse_marked_rect).
+  for (const [name, rect] of Object.entries(pfRegions)) {
+    if (rect) form.append(`${name}_rect`, JSON.stringify(rect));
+  }
+
+  // Only send styling that actually differs from the server's defaults --
+  // an untouched slider should leave the job on whatever .env says, not
+  // pin it to today's default forever.
+  const changed = {};
+  for (const [k, v] of Object.entries(styleValues)) {
+    if (v !== STYLE_DEFAULTS[k]) changed[k] = v;
+  }
+  if (Object.keys(changed).length) form.append('style_overrides', JSON.stringify(changed));
+}
+
+// ---- pre-upload framing picker ----
+//
+// The framing marks matter most BEFORE the pipeline runs, so this pulls a
+// frame out of the chosen file locally -- a <video> fed an object URL, drawn
+// to a <canvas> -- and never uploads or calls the API to do it. The marks
+// ride along with the upload as form fields, so the first render is already
+// framed correctly instead of the job having to exist first.
+//
+// Caveat this handles explicitly: browsers cannot decode every container we
+// accept. .mkv in particular usually fails in Chrome even though ffmpeg on
+// the server handles it fine. That is a preview limitation, not an upload
+// limitation, so a failure here degrades to "upload anyway, mark it in Job
+// detail" rather than blocking anything.
+const PF_SETUPS_KEY = "clipping-machine.framing-setups";
+const PF_CANVAS_WIDTH = 640;
+
+let pfVideo = null;
+let pfObjectUrl = null;
+let pfMode = "facecam";
+let pfRegions = { facecam: null, gameplay: null };
+let pfReady = false;
+
+function pfStatus(message) {
+  const el = $("#pf-status");
+  if (el) el.textContent = message;
+}
+
+function pfFormatTime(seconds) {
+  const s = Math.max(0, Math.floor(seconds || 0));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = String(s % 60).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${sec}` : `${m}:${sec}`;
+}
+
+function pfDrawCurrentFrame() {
+  if (!pfReady || !pfVideo) return;
+  const canvas = $("#pf-canvas");
+  const ratio = pfVideo.videoHeight / pfVideo.videoWidth || 9 / 16;
+  canvas.width = PF_CANVAS_WIDTH;
+  canvas.height = Math.round(PF_CANVAS_WIDTH * ratio);
+  canvas.style.width = "100%";
+  canvas.getContext("2d").drawImage(pfVideo, 0, 0, canvas.width, canvas.height);
+  pfRenderRegions();
+}
+
+function pfRenderRegions() {
+  const wrap = $("#pf-canvas-wrap");
+  if (!wrap) return;
+  wrap.querySelectorAll(".facecam-box.saved").forEach((el) => el.remove());
+  const r = wrap.getBoundingClientRect();
+  for (const [name, rect] of Object.entries(pfRegions)) {
+    if (!rect) continue;
+    const el = document.createElement("div");
+    el.className = "facecam-box saved";
+    const color = name === "facecam" ? "#4ade80" : "#60a5fa";
+    el.style.borderColor = color;
+    el.style.background = `${color}28`;
+    el.style.left = `${rect.x * r.width}px`;
+    el.style.top = `${rect.y * r.height}px`;
+    el.style.width = `${rect.w * r.width}px`;
+    el.style.height = `${rect.h * r.height}px`;
+    const tag = document.createElement("span");
+    tag.className = "facecam-box-tag";
+    tag.style.background = color;
+    tag.textContent = name;
+    el.appendChild(tag);
+    wrap.appendChild(el);
+  }
+}
+
+function pfDescribe() {
+  const bits = Object.entries(pfRegions)
+    .filter(([, rect]) => rect)
+    .map(([name, rect]) => `${name} ${(rect.w * 100).toFixed(0)}%x${(rect.h * 100).toFixed(0)}%`);
+  return bits.length ? bits.join("  ·  ") : "nothing marked";
+}
+
+function pfLoadFile(file) {
+  const panel = $("#pre-framing");
+  if (!panel) return;
+  panel.hidden = false;
+  pfReady = false;
+  pfRegions = { facecam: null, gameplay: null };
+  pfRenderRegions();
+
+  if (pfObjectUrl) URL.revokeObjectURL(pfObjectUrl);
+  pfObjectUrl = URL.createObjectURL(file);
+
+  if (!pfVideo) {
+    pfVideo = document.createElement("video");
+    pfVideo.muted = true;
+    pfVideo.preload = "metadata";
+    // Drawing a cross-origin frame would taint the canvas; an object URL of a
+    // local file is same-origin, so this stays readable.
+    pfVideo.addEventListener("seeked", pfDrawCurrentFrame);
+  }
+
+  pfStatus("Reading the file…");
+
+  pfVideo.onloadedmetadata = () => {
+    if (!pfVideo.videoWidth) {
+      pfStatus("This browser can't decode this file for preview (common with .mkv). Upload anyway — you can mark framing in Job detail once the job exists.");
+      return;
+    }
+    pfReady = true;
+    const scrub = $("#pf-scrub");
+    scrub.max = String(Math.max(1, Math.floor(pfVideo.duration || 1)));
+    scrub.value = "0";
+    $("#pf-time").textContent = pfFormatTime(0);
+    // Not frame 0: the opening of a VOD is usually a starting-soon screen,
+    // which shows nothing about the layout being marked.
+    pfVideo.currentTime = Math.min(60, (pfVideo.duration || 2) / 2);
+    pfStatus(`Scrub to a moment showing your layout, then drag a box around the ${pfMode}.`);
+  };
+
+  pfVideo.onerror = () => {
+    pfStatus("This browser can't decode this file for preview (common with .mkv). Upload anyway — you can mark framing in Job detail once the job exists.");
+  };
+
+  pfVideo.src = pfObjectUrl;
+}
+
+function pfSetMode(mode) {
+  pfMode = mode;
+  $("#pf-mode-facecam").classList.toggle("active", mode === "facecam");
+  $("#pf-mode-gameplay").classList.toggle("active", mode === "gameplay");
+  pfStatus(`Drag a box around the ${mode}.  ${pfDescribe()}`);
+}
+
+function pfSavedSetups() {
+  try {
+    return JSON.parse(localStorage.getItem(PF_SETUPS_KEY) || "{}");
+  } catch {
+    return {}; // corrupt or storage disabled -- setups are a convenience, never required
+  }
+}
+
+function pfRefreshSetupList() {
+  const select = $("#pf-setups");
+  if (!select) return;
+  const setups = pfSavedSetups();
+  select.innerHTML =
+    '<option value="">Load a saved setup…</option>' +
+    Object.keys(setups)
+      .map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`)
+      .join("");
+}
+
+function initPreFraming() {
+  const wrap = $("#pf-canvas-wrap");
+  if (!wrap) {
+    console.warn("[clipping-machine] pre-upload framing markup missing -- hard-refresh (Ctrl+Shift+R)");
+    return;
+  }
+
+  $("#file-input").addEventListener("change", (e) => {
+    const file = e.target.files[0];
+    if (file) pfLoadFile(file);
+    else $("#pre-framing").hidden = true;
+  });
+
+  $("#pf-scrub").addEventListener("input", (e) => {
+    if (!pfReady) return;
+    const at = Number(e.target.value);
+    $("#pf-time").textContent = pfFormatTime(at);
+    pfVideo.currentTime = at; // 'seeked' redraws
+  });
+
+  $("#pf-mode-facecam").addEventListener("click", () => pfSetMode("facecam"));
+  $("#pf-mode-gameplay").addEventListener("click", () => pfSetMode("gameplay"));
+
+  $("#pf-clear").addEventListener("click", () => {
+    pfRegions = { facecam: null, gameplay: null };
+    pfRenderRegions();
+    pfStatus("Boxes cleared — framing falls back to automatic detection.");
+  });
+
+  // --- drag to mark ---
+  const live = $("#pf-live");
+  let dragging = false;
+  let originX = 0;
+  let originY = 0;
+
+  const relative = (event) => {
+    const r = wrap.getBoundingClientRect();
+    return {
+      x: Math.min(Math.max(event.clientX - r.left, 0), r.width),
+      y: Math.min(Math.max(event.clientY - r.top, 0), r.height),
+      w: r.width,
+      h: r.height,
+    };
+  };
+
+  wrap.addEventListener("pointerdown", (e) => {
+    if (!pfReady) return;
+    const p = relative(e);
+    dragging = true;
+    originX = p.x;
+    originY = p.y;
+    wrap.setPointerCapture(e.pointerId);
+    const color = pfMode === "facecam" ? "#4ade80" : "#60a5fa";
+    live.hidden = false;
+    live.style.borderColor = color;
+    live.style.background = `${color}28`;
+    live.style.left = `${p.x}px`;
+    live.style.top = `${p.y}px`;
+    live.style.width = "0px";
+    live.style.height = "0px";
+    e.preventDefault();
+  });
+
+  wrap.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    const p = relative(e);
+    live.style.left = `${Math.min(originX, p.x)}px`;
+    live.style.top = `${Math.min(originY, p.y)}px`;
+    live.style.width = `${Math.abs(p.x - originX)}px`;
+    live.style.height = `${Math.abs(p.y - originY)}px`;
+  });
+
+  const finish = (e) => {
+    if (!dragging) return;
+    dragging = false;
+    live.hidden = true;
+    const p = relative(e);
+    const w = Math.abs(p.x - originX);
+    const h = Math.abs(p.y - originY);
+    if (w < 8 || h < 8) {
+      pfStatus(`That box was too small to count. Drag a box around the ${pfMode}.`);
+      return;
+    }
+    pfRegions[pfMode] = {
+      x: Math.min(originX, p.x) / p.w,
+      y: Math.min(originY, p.y) / p.h,
+      w: w / p.w,
+      h: h / p.h,
+    };
+    pfRenderRegions();
+    pfStatus(`${pfDescribe()} — these upload with the job.`);
+  };
+
+  wrap.addEventListener("pointerup", finish);
+  wrap.addEventListener("pointercancel", finish);
+  window.addEventListener("resize", pfRenderRegions);
+
+  // --- saved setups (your rig is the same every stream) ---
+  $("#pf-save-setup").addEventListener("click", () => {
+    const name = $("#pf-setup-name").value.trim();
+    if (!name) return showToast("Give the setup a name first");
+    if (!pfRegions.facecam && !pfRegions.gameplay) return showToast("Mark at least one box first");
+    try {
+      const setups = pfSavedSetups();
+      setups[name] = pfRegions;
+      localStorage.setItem(PF_SETUPS_KEY, JSON.stringify(setups));
+      pfRefreshSetupList();
+      pfStatus(`Saved "${name}". Pick it from the list on your next upload.`);
+    } catch {
+      showToast("Could not save the setup (browser storage unavailable)");
+    }
+  });
+
+  $("#pf-setups").addEventListener("change", (e) => {
+    const name = e.target.value;
+    if (!name) return;
+    const setups = pfSavedSetups();
+    if (!setups[name]) return;
+    pfRegions = { facecam: setups[name].facecam || null, gameplay: setups[name].gameplay || null };
+    pfRenderRegions();
+    pfStatus(`Loaded "${name}" — ${pfDescribe()}.`);
+  });
+
+  pfRefreshSetupList();
+}
+
+// ---- layout & text preview ----
+//
+// The point of this panel is that it is FAITHFUL, not decorative. Every
+// number below came from rendering real libass output on a 1080x1920 frame
+// and measuring the lit pixel rows -- libass interprets FontSize against its
+// own script resolution, so nothing here can be derived from the ASS spec.
+//
+//   caption clearance from the bottom :  28->188px  40->268  55->368  70->468
+//   title top edge from the top       :  10->80px   30->214  35->247  50->347
+//   caption ink height                :  fs8->45px  fs9->50  fs10->56
+//
+// Each is linear over the usable range, so a slope+intercept reproduces the
+// real geometry closely enough that the phone matches the render.
+const LAYOUT_METRICS = {
+  OUT_W: 1080,
+  OUT_H: 1920,
+  captionClearancePx: (marginV) => 6.67 * marginV,
+  titleTopPx: (marginV) => 6.675 * marginV + 13,
+  captionInkPx: (fontSize) => 5.5 * fontSize + 1,
+  // The title is bold with a heavier outline, so it does not share the
+  // caption's slope: measured 246px for two lines at size 13 => ~123 each.
+  titleInkPx: (fontSize) => 9.46 * fontSize,
+  // TikTok's own chrome, same constants as app/core/rendering_logic.py.
+  safe: { top: 200, bottom: 334, left: 86, right: 140 },
+};
+
+const STYLE_DEFAULTS = {
+  split_facecam_fraction: 0.35,
+  caption_font_size: 8,
+  caption_margin_v: 55,
+  caption_max_chars: 80,
+  title_font_size: 13,
+  title_margin_v: 30,
+};
+
+const STYLE_KEY = "clipping-machine.style-overrides";
+let styleValues = { ...STYLE_DEFAULTS };
+
+function loadSavedStyle() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(STYLE_KEY) || "{}");
+    for (const k of Object.keys(STYLE_DEFAULTS)) {
+      if (typeof raw[k] === "number") styleValues[k] = raw[k];
+    }
+  } catch {
+    /* corrupt or storage disabled -- defaults are fine */
+  }
+}
+
+function saveStyle() {
+  try {
+    localStorage.setItem(STYLE_KEY, JSON.stringify(styleValues));
+  } catch {
+    /* a convenience, never required */
+  }
+}
+
+// CSS font-size is an em box; the measurements above are INK height (the lit
+// rows). For typical faces the ink of a mixed-case line is ~75% of the em,
+// so dividing keeps the preview text visually the same size as the render.
+function inkToCssPx(inkPx, scale) {
+  return (inkPx * scale) / 0.75;
+}
+
+function renderPhonePreview() {
+  const phone = $("#phone");
+  if (!phone) return;
+  const M = LAYOUT_METRICS;
+  const h = phone.clientHeight || 480;
+  const scale = h / M.OUT_H;
+
+  const camPct = styleValues.split_facecam_fraction * 100;
+  $("#ph-cam").style.height = `${camPct}%`;
+  $("#ph-game").style.height = `${100 - camPct}%`;
+
+  const titleTop = M.titleTopPx(styleValues.title_margin_v);
+  const titleEl = $("#ph-title");
+  titleEl.style.top = `${titleTop * scale}px`;
+  titleEl.style.fontSize = `${inkToCssPx(M.titleInkPx(styleValues.title_font_size), scale)}px`;
+
+  const capClear = M.captionClearancePx(styleValues.caption_margin_v);
+  const capEl = $("#ph-caption");
+  capEl.style.bottom = `${capClear * scale}px`;
+  capEl.style.fontSize = `${inkToCssPx(M.captionInkPx(styleValues.caption_font_size), scale)}px`;
+
+  // safe zones, as a share of the output
+  const z = $("#ph-zones");
+  z.querySelector(".safe-zone-top").style.height = `${(M.safe.top / M.OUT_H) * 100}%`;
+  z.querySelector(".safe-zone-bottom").style.height = `${(M.safe.bottom / M.OUT_H) * 100}%`;
+  z.querySelector(".safe-zone-left").style.width = `${(M.safe.left / M.OUT_W) * 100}%`;
+  z.querySelector(".safe-zone-right").style.width = `${(M.safe.right / M.OUT_W) * 100}%`;
+
+  // readouts
+  const camPx = Math.floor(M.OUT_H * styleValues.split_facecam_fraction / 2) * 2;
+  $("#out-split").textContent =
+    `${Math.round(camPct)}% cam — ${camPx}px cam / ${M.OUT_H - camPx}px gameplay`;
+  $("#out-capsize").textContent =
+    `${styleValues.caption_font_size} — about ${Math.round(1080 / (M.captionInkPx(styleValues.caption_font_size) * 0.62))} chars per line`;
+  $("#out-capmargin").textContent = `${styleValues.caption_margin_v} — ${Math.round(capClear)}px above the bottom`;
+  $("#out-capchars").textContent = `${styleValues.caption_max_chars} characters`;
+  $("#out-titlesize").textContent = `${styleValues.title_font_size}`;
+  $("#out-titlemargin").textContent = `${styleValues.title_margin_v} — starts ${Math.round(titleTop)}px down`;
+
+  // Warnings, because the sliders let you go somewhere the render will look
+  // fine in this console and be half-hidden in the actual feed.
+  const warnings = [];
+  if (capClear < M.safe.bottom) {
+    warnings.push(`Caption sits ${Math.round(M.safe.bottom - capClear)}px inside TikTok's bottom UI — it will be covered by the username and caption text.`);
+  }
+  if (titleTop < M.safe.top) {
+    warnings.push(`Title starts ${Math.round(M.safe.top - titleTop)}px behind TikTok's top navigation.`);
+  }
+  const warnEl = $("#sty-warnings");
+  warnEl.innerHTML = warnings.length
+    ? warnings.map((w) => `<div style="color:var(--bad)">⚠ ${escapeHtml(w)}</div>`).join("")
+    : `<div style="color:var(--ok)">✓ Title and captions both clear TikTok's UI.</div>`;
+}
+
+const STYLE_SLIDERS = [
+  ["#sty-split", "split_facecam_fraction", parseFloat],
+  ["#sty-capsize", "caption_font_size", parseInt],
+  ["#sty-capmargin", "caption_margin_v", parseInt],
+  ["#sty-capchars", "caption_max_chars", parseInt],
+  ["#sty-titlesize", "title_font_size", parseInt],
+  ["#sty-titlemargin", "title_margin_v", parseInt],
+];
+
+function syncSlidersFromValues() {
+  for (const [sel, key] of STYLE_SLIDERS) {
+    const el = $(sel);
+    if (el) el.value = String(styleValues[key]);
+  }
+  renderPhonePreview();
+}
+
+function initLayoutEditor() {
+  if (!$("#phone")) {
+    console.warn("[clipping-machine] layout editor markup missing -- hard-refresh (Ctrl+Shift+R)");
+    return;
+  }
+  loadSavedStyle();
+
+  for (const [sel, key, parse] of STYLE_SLIDERS) {
+    $(sel).addEventListener("input", (e) => {
+      styleValues[key] = parse(e.target.value);
+      saveStyle();
+      renderPhonePreview();
+    });
+  }
+
+  $("#sty-reset").addEventListener("click", () => {
+    styleValues = { ...STYLE_DEFAULTS };
+    saveStyle();
+    syncSlidersFromValues();
+  });
+
+  $("#ph-show-zones").addEventListener("change", (e) => {
+    $("#ph-zones").hidden = !e.target.checked;
+  });
+
+  window.addEventListener("resize", renderPhonePreview);
+  syncSlidersFromValues();
+}
+
+// ---- AI model settings ----
+//
+// The API key never comes back from the server -- GET reports only whether
+// one is set and its last four characters. So the input is always blank on
+// load, and an empty input on save means "leave it alone" rather than
+// "delete it"; deletion is its own explicit button. That asymmetry is
+// deliberate: a blank field silently wiping a working key is exactly the
+// kind of thing you only notice a render later.
+let llmSettings = null;
+
+function renderLlmSettings() {
+  if (!llmSettings) return;
+  const s = llmSettings;
+  const chosen = s.provider || s.effective_provider;
+  $("#llm-ollama").checked = chosen === "ollama";
+  $("#llm-openai").checked = chosen === "openai";
+
+  $("#llm-ollama-desc").textContent = `free, private, slower — ${s.ollama_model}`;
+  $("#llm-openai-desc").textContent = `better selection, costs per use — ${s.openai_model}`;
+
+  $("#llm-key-state").textContent = s.has_own_key
+    ? `saved (${s.key_hint})`
+    : s.server_has_key
+      ? "none saved — the server's own key would be used"
+      : "none saved";
+
+  const notes = [];
+  if (!s.segment_suggestions_enabled) {
+    notes.push(
+      "Transcript analysis is currently OFF (ENABLE_LLM_SEGMENT_SUGGESTIONS in .env), so no model " +
+      "is reading your transcript to find clip-worthy moments regardless of what you pick here."
+    );
+  }
+  if (s.effective_provider === "openai" && !s.has_own_key && s.server_has_key) {
+    notes.push("Using the server's .env key, not one of yours.");
+  }
+  notes.push("Still set in .env, not here: model names, the Ollama URL, and whether transcript analysis runs at all.");
+  $("#llm-note").innerHTML = notes.map((n) => escapeHtml(n)).join("<br>");
+}
+
+async function loadLlmSettings() {
+  try {
+    llmSettings = await apiFetch("/api/v1/settings/llm");
+    renderLlmSettings();
+  } catch {
+    /* toast already shown */
+  }
+}
+
+async function saveLlmSettings({ removeKey = false } = {}) {
+  const body = { provider: $("#llm-openai").checked ? "openai" : "ollama" };
+  const typed = $("#llm-key").value.trim();
+  if (removeKey) {
+    body.api_key = null;
+  } else if (typed) {
+    body.api_key = typed;
+  }
+  // else: api_key omitted entirely -> server leaves the stored key untouched
+
+  const status = $("#llm-status");
+  status.textContent = "Saving…";
+  try {
+    llmSettings = await apiFetch("/api/v1/settings/llm", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    $("#llm-key").value = "";
+    renderLlmSettings();
+    status.textContent = removeKey ? "Key removed." : "Saved.";
+    setTimeout(() => { status.textContent = ""; }, 4000);
+  } catch {
+    status.textContent = "";
+  }
+}
+
+function initLlmSettings() {
+  if (!$("#llm-save")) {
+    console.warn("[clipping-machine] AI model panel missing -- hard-refresh (Ctrl+Shift+R)");
+    return;
+  }
+  $("#llm-save").addEventListener("click", () => saveLlmSettings());
+  $("#llm-remove-key").addEventListener("click", () => {
+    if (confirm("Remove the saved API key? Jobs fall back to the server's key, or to Ollama.")) {
+      saveLlmSettings({ removeKey: true });
+    }
+  });
 }
 
 function initUploadForm() {
@@ -1026,7 +1712,7 @@ function initConnectTikTokButton() {
 
 async function refreshAll() {
   await checkHealth();
-  if (!getToken()) return; // avoid firing (and console-logging) 401s before a token is set
+  if (!currentUser) return; // not signed in yet -- don't fire 401s during startup/redirect
   await loadJobs();
   await loadAccounts();
   if (selectedJobId) await loadJobDetail();
@@ -1046,15 +1732,24 @@ function initAutoRefresh() {
 
 // ---- init ----
 
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
   $("#api-base-display").textContent = API_BASE;
-  initTokenPanel();
+  initSessionUi();
+
+  // Everything below needs a session. requireAuth() redirects to the login
+  // page on 401, so bailing here is what stops a burst of doomed requests
+  // firing while the browser is already navigating away.
+  if (!(await requireAuth())) return;
   initUploadForm();
   initFacecamMarker();
+  initPreFraming();
+  initLayoutEditor();
+  initLlmSettings();
   initAddAccountForm();
   initConnectTikTokButton();
   $("#refresh-jobs-btn").addEventListener("click", loadJobs);
   $("#refresh-accounts-btn").addEventListener("click", loadAccounts);
   initAutoRefresh();
   refreshAll();
+  loadLlmSettings();
 });

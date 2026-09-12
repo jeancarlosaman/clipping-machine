@@ -50,6 +50,7 @@ def generate_llm_segment_suggestions(
     min_len: float,
     max_len: float,
     feedback_examples: list[dict] | None = None,
+    llm_config=None,
 ) -> list[dict]:
     """Best-effort list of LLM-suggested candidate windows for one job's
     transcript, each `{"start": float, "end": float, "reason": str}`.
@@ -80,19 +81,20 @@ def generate_llm_segment_suggestions(
         )
         return []
 
-    provider = settings.caption_llm_provider
-    if provider == "openai" and not settings.openai_api_key:
+    # Per-account when the caller resolved one (see app.core.llm_config),
+    # otherwise the .env defaults -- which is byte-for-byte the old behaviour.
+    if llm_config is None:
+        from app.core.llm_config import resolve_llm_config
+
+        llm_config = resolve_llm_config(None)
+    if not llm_config.usable:
+        logger.warning("llm_segmentation.no_usable_llm", provider=llm_config.provider)
         return []
+    provider, api_key, model, base_url = (
+        llm_config.provider, llm_config.api_key, llm_config.model, llm_config.base_url,
+    )
 
-    if provider == "ollama":
-        base_url = settings.caption_ollama_base_url
-        api_key = "ollama"  # Ollama ignores this; the openai client just requires a non-empty string
-        model = settings.caption_ollama_model
-    else:
-        base_url = None  # openai package's own default (OpenAI's real API)
-        api_key = settings.openai_api_key
-        model = settings.caption_llm_model
-
+    dropped: list[str] = []
     max_suggestions = settings.llm_segment_max_suggestions
     prompt = build_segment_suggestion_prompt(
         transcript_segments, min_len, max_len, max_suggestions, feedback_examples=feedback_examples
@@ -109,7 +111,9 @@ def generate_llm_segment_suggestions(
             max_tokens=1200,  # a full array of up to max_suggestions reasoned entries needs more room than one caption
         )
         raw_text = response.choices[0].message.content
-        suggestions = parse_segment_suggestions(raw_text, transcript_segments, min_len, max_len, max_suggestions)
+        suggestions = parse_segment_suggestions(raw_text, transcript_segments, min_len, max_len, max_suggestions,
+        dropped=dropped,
+    )
     except Exception as exc:
         # Covers a down/unreachable Ollama server the same way it already
         # covers OpenAI errors -- connection failures land here too, not
@@ -117,5 +121,18 @@ def generate_llm_segment_suggestions(
         logger.warning("llm_segmentation.llm_failed", provider=provider, error=str(exc))
         return []
 
-    logger.info("llm_segmentation.suggested", provider=provider, model=model, count=len(suggestions))
+    # Report WHY nothing came back, not just that nothing did. "count: 0" with
+    # a successful API call was previously a dead end -- no way to tell an
+    # empty model response from one whose every suggestion failed validation
+    # (almost always a clip-length range that nothing fits).
+    logger.info(
+        "llm_segmentation.suggested",
+        provider=provider,
+        model=model,
+        count=len(suggestions),
+        dropped_count=len(dropped),
+        dropped_reasons=sorted(set(dropped))[:6] or None,
+        min_len=min_len,
+        max_len=max_len,
+    )
     return suggestions

@@ -1,268 +1,386 @@
+/* ============================================================================
+   Clipping Machine — dev console
+   ============================================================================
+
+   Design direction: near-black surfaces, silver structure, white for action.
+
+   Why neutral chrome: every clip card is dominated by a video thumbnail,
+   which is already saturated. A colourful UI competes with the thing you are
+   actually trying to judge. So everything structural is greyscale, and the
+   only saturated colours in the whole file are the three review states
+   (approve / reject / rating) -- those have to stay scannable at a glance
+   when you are moving through a queue on the keyboard.
+
+   Why not pure #000 on #fff: this is a tool you stare at for an hour
+   reviewing a VOD's worth of clips. Near-black (#0d0f13) against off-white
+   (#e8ecf2) keeps the contrast high without the glare.
+
+   Every class name that existed before is preserved -- several of them
+   (approve-btn, reject-btn, download-btn, secondary, danger, small,
+   rating-stars ...) were referenced in markup but had no styling at all and
+   rendered as browser-default buttons.
+   ========================================================================= */
+
 :root {
-  --bg: #0f1115;
-  --panel: #161922;
-  --border: #2a2f3a;
-  --text: #e6e8eb;
-  --muted: #8a8f99;
-  --accent: #5b8def;
-  --ok: #3fbf76;
-  --warn: #e0a83e;
-  --err: #e05a5a;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  /* surfaces, darkest to lightest */
+  --bg: #0d0f13;
+  --surface: #14181f;
+  --surface-2: #1a1f28;
+  --surface-3: #222834;
+
+  /* lines */
+  --line: #242b36;
+  --line-strong: #333b49;
+
+  /* text */
+  --text: #e8ecf2;
+  --text-dim: #9aa6b8;
+  --text-faint: #6b7684;
+
+  /* silver accent: focus rings, selection, active chrome */
+  --silver: #aebbcc;
+  --silver-dim: rgba(174, 187, 204, 0.16);
+
+  /* the only saturated colours in the system */
+  --ok: #4ade80;
+  --bad: #f87171;
+  --warn: #fbbf24;
+  --info: #7dd3fc;
+
+  /* framing marks -- must stay distinguishable over arbitrary video */
+  --cam: #4ade80;
+  --game: #60a5fa;
+
+  --radius: 10px;
+  --radius-sm: 7px;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.25);
 }
 
 * { box-sizing: border-box; }
 
+html { color-scheme: dark; }
+
 body {
   margin: 0;
+  padding: 28px 24px 80px;
   background: var(--bg);
   color: var(--text);
-  padding: 0 1.5rem 3rem;
-  max-width: 960px;
+  font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  /* Numbers (scores, timestamps, durations) line up in columns instead of
+     jittering as digits change during polling. */
+  font-variant-numeric: tabular-nums;
+  max-width: 1180px;
   margin-inline: auto;
 }
 
-header {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  padding: 1.5rem 0 1rem;
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 1.5rem;
+/* ---------------------------------------------------------------- type -- */
+
+h1 { font-size: 21px; letter-spacing: -0.01em; margin: 0 0 20px; }
+h2 { font-size: 16px; letter-spacing: -0.005em; margin: 0 0 14px; }
+h3 {
+  font-size: 11.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-dim);
+  margin: 22px 0 10px;
 }
 
-h1 { font-size: 1.25rem; margin: 0; font-weight: 600; }
-h2 { font-size: 1rem; margin: 0 0 0.75rem; }
-h3 { font-size: 0.9rem; margin: 1rem 0 0.5rem; color: var(--muted); }
+a { color: var(--silver); }
 
-.muted { color: var(--muted); font-size: 0.85rem; }
-.mono { font-family: "SF Mono", Consolas, monospace; font-size: 0.85rem; }
+.muted { color: var(--text-dim); }
+.small { font-size: 12.5px; }
+
+.mono, code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+}
+
+code {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0 5px;
+}
+
+/* --------------------------------------------------------------- layout -- */
 
 .panel {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 1rem 1.25rem;
-  margin-bottom: 1.25rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+  margin-bottom: 16px;
 }
 
 .row {
   display: flex;
-  align-items: center;
-  gap: 0.6rem;
+  gap: 12px;
   flex-wrap: wrap;
-  margin-bottom: 0.5rem;
+  align-items: center;
 }
 
-input[type="text"], input[type="file"] {
-  background: #0d0f14;
-  border: 1px solid var(--border);
-  color: var(--text);
-  padding: 0.45rem 0.6rem;
-  border-radius: 6px;
-  font-size: 0.85rem;
-  flex: 1;
-  min-width: 200px;
-}
-
-input[type="number"], select {
-  background: #0d0f14;
-  border: 1px solid var(--border);
-  color: var(--text);
-  padding: 0.4rem 0.5rem;
-  border-radius: 6px;
-  font-size: 0.85rem;
-}
+/* ------------------------------------------------------------- controls -- */
 
 label {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: 0.85rem;
-  color: var(--muted);
+  display: inline-flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12.5px;
+  color: var(--text-dim);
 }
 
-#upload-options, #add-account-form {
-  margin-top: 0.6rem;
-  border-top: 1px solid var(--border);
-  padding-top: 0.6rem;
-}
-#upload-options summary, #add-account-form summary {
-  cursor: pointer;
-  font-size: 0.85rem;
-  color: var(--muted);
-  margin-bottom: 0.6rem;
-}
-#upload-options .opt-hint, #add-account-form .opt-hint { margin: 0.2rem 0 0.6rem; }
-
-button {
-  background: var(--accent);
-  color: white;
-  border: none;
-  padding: 0.5rem 0.9rem;
-  border-radius: 6px;
-  font-size: 0.85rem;
-  cursor: pointer;
-}
-button:hover { filter: brightness(1.1); }
-button:disabled { opacity: 0.5; cursor: not-allowed; }
-button.secondary { background: #2a2f3a; }
-button.danger { background: var(--err); }
-
-.rating-row { align-items: center; }
-button.star-btn {
-  background: transparent;
-  color: #e8b84b;
-  border: none;
-  padding: 0 0.05rem;
-  font-size: 1.1rem;
-  line-height: 1;
-  cursor: pointer;
-}
-button.star-btn:hover { filter: brightness(1.3); }
-.rating-clear-link { color: var(--muted); }
-
-/* Free-text reviewer comment, saved with whichever decision button is
-   pressed. Deliberately full-width and always visible rather than hidden
-   behind an "add comment" toggle -- these comments are the input to the
-   LLM segment proposer's few-shot examples, so the friction of writing
-   one should be as close to zero as possible. */
-textarea.review-notes-input {
-  background: #0d0f14;
-  border: 1px solid var(--border);
+input[type="text"],
+input[type="number"],
+input[type="password"],
+select,
+textarea {
+  background: var(--surface-2);
   color: var(--text);
-  padding: 0.45rem 0.6rem;
-  border-radius: 6px;
-  font-size: 0.85rem;
-  font-family: inherit;
-  width: 100%;
-  box-sizing: border-box;
-  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 13px;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
 }
-textarea.review-notes-input::placeholder { color: var(--muted); }
 
-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.85rem;
-  margin-top: 0.5rem;
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--silver);
+  box-shadow: 0 0 0 3px var(--silver-dim);
 }
-th, td {
-  text-align: left;
-  padding: 0.5rem 0.6rem;
-  border-bottom: 1px solid var(--border);
-}
-th { color: var(--muted); font-weight: 500; }
-tr:hover td { background: rgba(255,255,255,0.02); }
-tr.selectable { cursor: pointer; }
 
-.pill {
-  display: inline-block;
-  padding: 0.15rem 0.55rem;
-  border-radius: 999px;
-  font-size: 0.75rem;
+input::placeholder, textarea::placeholder { color: var(--text-faint); }
+
+select { cursor: pointer; }
+
+/* Buttons: white = do the thing, outline = everything else. Kept to two
+   weights on purpose -- a screen where six buttons all shout is a screen
+   where none of them do. */
+button {
+  font: inherit;
+  font-size: 13px;
   font-weight: 600;
-}
-.pill-unknown { background: #2a2f3a; color: var(--muted); }
-.pill-ok { background: rgba(63,191,118,0.15); color: var(--ok); }
-.pill-warn { background: rgba(224,168,62,0.15); color: var(--warn); }
-.pill-err { background: rgba(224,90,90,0.15); color: var(--err); }
-
-.json-block {
-  background: #0d0f14;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 0.75rem;
-  font-size: 0.78rem;
-  overflow-x: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
+  padding: 7px 15px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--text);
+  background: var(--text);
+  color: #0b0d11;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
 }
 
-.clip-card {
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 0.75rem;
-  margin-bottom: 0.6rem;
+button:hover { background: #fff; border-color: #fff; }
+
+button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--silver-dim);
 }
-.clip-card .row { margin-bottom: 0.3rem; }
-.clip-preview { margin: 0.5rem 0; min-height: 0; }
-.clip-preview:empty { display: none; }
 
-.muted.small { font-size: 0.78rem; margin-top: 0.2rem; }
-
-.clip-title-row { display: flex; align-items: center; gap: 0.5rem; margin: 0.35rem 0; }
-.clip-title { font-weight: 700; font-size: 1rem; line-height: 1.25; }
-.title-edit-form { display: flex; gap: 0.4rem; margin: 0.35rem 0; align-items: center; }
-.title-edit-input { flex: 1; min-width: 0; }
-
-.hashtags-row { display: flex; align-items: center; gap: 0.4rem; margin-top: 0.3rem; }
-.hashtags { display: flex; flex-wrap: wrap; gap: 0.3rem; }
-.hashtag {
-  display: inline-block;
-  padding: 0.1rem 0.5rem;
-  border-radius: 999px;
-  background: rgba(90,140,255,0.12);
-  color: var(--accent, #5a8cff);
-  font-size: 0.75rem;
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  background: var(--surface-3);
+  border-color: var(--line);
+  color: var(--text-dim);
 }
-.link-btn {
+
+button.secondary,
+.secondary {
+  background: transparent;
+  color: var(--text);
+  border-color: var(--line-strong);
+  font-weight: 500;
+}
+
+button.secondary:hover { background: var(--surface-3); border-color: var(--silver); }
+
+button.danger,
+.danger {
+  background: transparent;
+  color: var(--bad);
+  border-color: rgba(248, 113, 113, 0.45);
+  font-weight: 500;
+}
+
+button.danger:hover { background: rgba(248, 113, 113, 0.12); border-color: var(--bad); }
+
+button.small, .small button { padding: 4px 10px; font-size: 12px; }
+
+/* Review actions: the three places saturated colour earns its keep. */
+.approve-btn {
+  background: transparent;
+  color: var(--ok);
+  border-color: rgba(74, 222, 128, 0.45);
+}
+.approve-btn:hover { background: rgba(74, 222, 128, 0.14); border-color: var(--ok); }
+
+.reject-btn {
+  background: transparent;
+  color: var(--bad);
+  border-color: rgba(248, 113, 113, 0.45);
+}
+.reject-btn:hover { background: rgba(248, 113, 113, 0.12); border-color: var(--bad); }
+
+.preview-btn, .download-btn, .view-btn, .delete-clip-btn, .delete-job-btn,
+.save-title-btn, .cancel-title-btn, .save-hashtags-btn, .cancel-hashtags-btn {
+  background: transparent;
+  color: var(--text);
+  border-color: var(--line-strong);
+  font-weight: 500;
+}
+.preview-btn:hover, .download-btn:hover, .view-btn:hover,
+.save-title-btn:hover, .cancel-title-btn:hover,
+.save-hashtags-btn:hover, .cancel-hashtags-btn:hover {
+  background: var(--surface-3);
+  border-color: var(--silver);
+}
+.delete-clip-btn, .delete-job-btn { color: var(--bad); border-color: rgba(248,113,113,.35); }
+.delete-clip-btn:hover, .delete-job-btn:hover { background: rgba(248,113,113,.12); }
+
+/* The one unambiguous primary action on the page. It inherits the white
+   button style by default, but declared explicitly so it stays primary if
+   the base button style is ever softened. */
+.upload-btn { font-weight: 650; padding: 8px 18px; }
+
+.link-btn, .rating-clear-link {
   background: none;
   border: none;
-  color: var(--muted);
-  font-size: 0.75rem;
+  padding: 0 2px;
+  color: var(--text-dim);
+  font-weight: 500;
+  font-size: 12.5px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
   cursor: pointer;
-  padding: 0;
 }
-.link-btn:hover { color: var(--accent, #5a8cff); }
-.hashtag-edit-form { display: flex; gap: 0.4rem; margin-top: 0.3rem; align-items: center; }
-.hashtag-edit-input { flex: 1; min-width: 0; }
+.link-btn:hover, .rating-clear-link:hover { background: none; color: var(--text); }
 
-.toast {
-  position: fixed;
-  bottom: 1.25rem;
-  right: 1.25rem;
-  background: var(--err);
-  color: white;
-  padding: 0.6rem 1rem;
-  border-radius: 6px;
-  font-size: 0.85rem;
-  max-width: 420px;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
-}
+/* ----------------------------------------------------------------- data -- */
 
-footer {
-  border-top: 1px solid var(--border);
-  padding-top: 1rem;
-  margin-top: 2rem;
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+
+th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
 }
 
-/* ---- clip preview + TikTok safe-zone overlay ---- */
-/* The overlay exists because this preview shows the RAW clip, while TikTok
-   draws its own UI on top in the feed. A caption that looks fine here can
-   sit underneath the platform's own caption text -- which is exactly how
-   the burned-in caption band drifted into TikTok's bottom UI over three
-   "move it lower" iterations before anyone could see the collision. */
-.clip-preview {
+td { padding: 9px 10px; border-bottom: 1px solid var(--line); }
+
+tbody tr { cursor: pointer; transition: background 0.1s ease; }
+tbody tr:hover { background: var(--surface-2); }
+
+.json-block {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  overflow: auto;
+  max-height: 260px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+/* Status pills. Neutral by default; only real problems get colour, so a
+   screen full of "queued/running" reads calm and a failure stands out. */
+.pill {
   display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  background: var(--surface-3);
+  color: var(--text-dim);
+  border: 1px solid var(--line);
 }
 
-.clip-preview-stage {
-  position: relative;
-  display: inline-block;
-  line-height: 0; /* kills the descender gap under the video box */
+.pill-ok { background: rgba(74, 222, 128, 0.12); color: var(--ok); border-color: rgba(74,222,128,.3); }
+.pill-warn { background: rgba(251, 191, 36, 0.12); color: var(--warn); border-color: rgba(251,191,36,.3); }
+.pill-err { background: rgba(248, 113, 113, 0.12); color: var(--bad); border-color: rgba(248,113,113,.3); }
+.pill-unknown { background: var(--surface-3); color: var(--text-faint); }
+
+/* ---------------------------------------------------------------- clips -- */
+
+.clip-card {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 12px;
+  transition: border-color 0.12s ease;
 }
+
+.clip-card:hover { border-color: var(--line-strong); }
+
+.clip-title-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+.clip-title {
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.005em;
+}
+
+.title-edit-form, .hashtag-edit-form { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+.title-edit-input, .hashtag-edit-input { flex: 1; min-width: 260px; }
+
+.hashtags-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+.hashtags { display: flex; gap: 6px; flex-wrap: wrap; }
+
+.hashtag {
+  font-size: 12px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  color: var(--text-dim);
+  border: 1px solid var(--line);
+}
+
+.rating-row, .rating-clear-wrap { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+.rating-stars { letter-spacing: 3px; color: var(--warn); cursor: pointer; font-size: 16px; }
+
+.review-notes-wrap { margin: 10px 0 4px; }
+
+.review-notes-input {
+  width: 100%;
+  min-height: 58px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.review-result { font-size: 12.5px; color: var(--text-dim); margin-top: 6px; }
+
+/* ------------------------------------------------- clip preview + zones -- */
+
+.clip-preview { display: inline-block; }
+
+.clip-preview-stage { position: relative; display: inline-block; line-height: 0; }
 
 .clip-preview-stage video {
   max-width: 320px;
   border-radius: 8px;
   display: block;
+  background: #000;
 }
 
+/* TikTok draws its own chrome over every video in the feed. This preview
+   shows the RAW clip, which is exactly how the burned-in caption band drifted
+   under the platform's own caption text for three iterations without anyone
+   being able to see the collision. */
 .safe-zones {
   position: absolute;
   inset: 0;
-  pointer-events: none; /* never steal clicks from the video controls */
+  pointer-events: none;
   border-radius: 8px;
   overflow: hidden;
 }
@@ -271,139 +389,323 @@ footer {
   position: absolute;
   background: repeating-linear-gradient(
     45deg,
-    rgba(255, 64, 96, 0.30) 0 6px,
-    rgba(255, 64, 96, 0.14) 6px 12px
+    rgba(248, 113, 113, 0.28) 0 6px,
+    rgba(248, 113, 113, 0.12) 6px 12px
   );
-  outline: 1px solid rgba(255, 64, 96, 0.55);
+  outline: 1px solid rgba(248, 113, 113, 0.5);
   outline-offset: -1px;
 }
 
-.safe-zone-top    { top: 0; left: 0; right: 0; }
+.safe-zone-top { top: 0; left: 0; right: 0; }
 .safe-zone-bottom { bottom: 0; left: 0; right: 0; }
-.safe-zone-left   { top: 0; bottom: 0; left: 0; }
-.safe-zone-right  { top: 0; bottom: 0; right: 0; }
+.safe-zone-left { top: 0; bottom: 0; left: 0; }
+.safe-zone-right { top: 0; bottom: 0; right: 0; }
 
 .safe-zone-toggle {
-  display: flex;
+  flex-direction: row;
   align-items: center;
-  gap: 6px;
-  margin-top: 6px;
-  font-size: 0.85rem;
-  line-height: 1.2;
+  gap: 7px;
+  margin-top: 8px;
+  font-size: 12.5px;
   cursor: pointer;
   user-select: none;
 }
 
-.safe-zone-toggle input {
-  cursor: pointer;
-}
+.safe-zone-toggle input { cursor: pointer; accent-color: var(--silver); }
 
 .safe-zone-toggle span {
   cursor: help;
-  border: 1px solid currentColor;
+  border: 1px solid var(--text-faint);
+  color: var(--text-faint);
   border-radius: 50%;
-  width: 14px;
-  height: 14px;
+  width: 15px;
+  height: 15px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 0.7rem;
+  font-size: 10px;
 }
 
-/* ---- facecam marker ---- */
-/* Replaces "guess where the facecam is" with "the creator points at it".
-   Coordinates are normalized against the displayed image, so the box stays
-   correct regardless of how the frame is scaled for display. */
+/* --------------------------------------------------- framing / marking -- */
+
 .facecam-marker {
-  margin: 12px 0 18px;
-  padding: 10px 12px;
-  border: 1px solid rgba(127, 127, 127, 0.3);
-  border-radius: 8px;
+  margin: 16px 0 20px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
 }
 
-.facecam-marker summary {
-  cursor: pointer;
-  font-weight: 600;
+.facecam-controls { align-items: flex-end; gap: 10px; margin: 12px 0; }
+
+.facecam-modes { align-items: center; gap: 8px; margin: 12px 0 8px; }
+
+/* Pill toggles rather than a <select>: with two options, one click beats
+   open-then-pick, and the active colour doubles as the legend for which box
+   colour you are about to draw. */
+.mode-btn {
+  padding: 5px 13px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--text-dim);
+  font-weight: 500;
+  font-size: 12.5px;
 }
 
-.facecam-controls {
-  align-items: flex-end;
-  gap: 10px;
-  margin: 10px 0;
+.mode-btn:hover { background: var(--surface-3); border-color: var(--silver); color: var(--text); }
+
+.mode-btn.active {
+  border-color: var(--cam);
+  background: rgba(74, 222, 128, 0.14);
+  color: var(--cam);
+  font-weight: 650;
 }
 
-.facecam-stage {
-  margin-top: 8px;
+#mode-gameplay.active {
+  border-color: var(--game);
+  background: rgba(96, 165, 250, 0.14);
+  color: var(--game);
 }
+
+.facecam-stage { margin-top: 10px; }
 
 .facecam-canvas {
   position: relative;
   display: inline-block;
   line-height: 0;
-  touch-action: none; /* pointer drags must not scroll the page on touch */
+  touch-action: none;
   cursor: crosshair;
   user-select: none;
+  border-radius: 8px;
+  overflow: hidden;
 }
 
-.facecam-canvas img {
+/* Job-detail picker draws an <img> (a frame fetched from the API); the
+   pre-upload picker draws a <canvas> (a frame pulled from the local file in
+   this browser). Same box, same drag maths, so they share the styling. */
+.facecam-canvas img,
+.facecam-canvas canvas {
   max-width: 100%;
   width: 640px;
-  border-radius: 6px;
   display: block;
+  background: #000;
   -webkit-user-drag: none;
   user-select: none;
 }
 
 .facecam-box {
   position: absolute;
-  border: 2px solid #4ade80;
+  border: 2px solid var(--cam);
   background: rgba(74, 222, 128, 0.16);
   border-radius: 2px;
-  pointer-events: none; /* never swallow the drag it is drawn by */
-}
-
-/* ---- two-region marker: mode buttons + saved box labels ---- */
-.facecam-modes {
-  align-items: center;
-  gap: 8px;
-  margin: 10px 0 6px;
-}
-
-.mode-btn {
-  padding: 4px 12px;
-  border-radius: 999px;
-  border: 1px solid rgba(127, 127, 127, 0.45);
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  font-size: 0.85rem;
-}
-
-.mode-btn.active {
-  border-color: #4ade80;
-  background: rgba(74, 222, 128, 0.15);
-  font-weight: 600;
-}
-
-#mode-gameplay.active {
-  border-color: #60a5fa;
-  background: rgba(96, 165, 250, 0.15);
-}
-
-/* Saved boxes stay drawn while a new one is being dragged, so you can see
-   the facecam mark while placing the gameplay mark and vice versa. */
-.facecam-box.saved {
   pointer-events: none;
 }
+
+.facecam-box.saved { pointer-events: none; }
 
 .facecam-box-tag {
   position: absolute;
   top: -1px;
   left: -1px;
   padding: 1px 6px;
-  font-size: 0.7rem;
+  font-size: 10px;
   font-weight: 700;
-  color: #10141a;
+  color: #0b0d11;
   border-radius: 2px;
-  line-height: 1.4;
+  line-height: 1.5;
+  letter-spacing: 0.02em;
 }
+
+/* ----------------------------------------------------------- upload opts -- */
+
+#upload-options { margin-top: 12px; }
+
+#upload-options summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  padding: 4px 0;
+  user-select: none;
+}
+
+#upload-options summary:hover { color: var(--text); }
+
+.opt-hint {
+  font-size: 12.5px;
+  line-height: 1.6;
+  margin: 10px 0 0;
+  padding-left: 12px;
+  border-left: 2px solid var(--line);
+}
+
+.opt-hint b { color: var(--text); font-weight: 600; }
+
+.account-select { min-width: 240px; }
+
+/* ---------------------------------------------------------------- toast -- */
+
+.toast {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  max-width: 460px;
+  background: var(--surface-3);
+  color: var(--text);
+  border: 1px solid var(--line-strong);
+  border-left: 3px solid var(--bad);
+  border-radius: var(--radius-sm);
+  padding: 12px 16px;
+  font-size: 13px;
+  line-height: 1.5;
+  box-shadow: var(--shadow);
+  z-index: 100;
+  animation: toast-in 0.16s ease-out;
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* --------------------------------------------------------------- motion -- */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ---- header: signed-in identity + sign out ---- */
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 22px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+header h1 { margin: 0; }
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* ---- layout & text preview (the phone) ---- */
+.layout-editor-grid {
+  display: flex;
+  gap: 26px;
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.phone-wrap { flex: 0 0 auto; }
+
+/* 9:16 at quarter scale of the real 1080x1920 output, so every position
+   drawn inside it is a straight proportional mapping of the measured
+   pixel values -- no second set of magic numbers. */
+.phone {
+  position: relative;
+  width: 270px;
+  height: 480px;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  background: #0a0c10;
+  box-shadow: var(--shadow);
+  user-select: none;
+}
+
+.phone-cam,
+.phone-game {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.phone-cam {
+  background: linear-gradient(150deg, #3b2f4a, #241d2e);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.phone-game { background: linear-gradient(160deg, #22303f, #141c26); }
+
+.phone-title,
+.phone-caption {
+  position: absolute;
+  left: 6%;
+  right: 6%;
+  text-align: center;
+  color: #fff;
+  line-height: 1.15;
+  /* Mirrors the burned-in look: white with a hard black outline, which is
+     what makes it legible over arbitrary video. */
+  text-shadow: 0 0 2px #000, 1px 1px 1px #000, -1px 1px 1px #000, 1px -1px 1px #000, -1px -1px 1px #000;
+  pointer-events: none;
+}
+
+.phone-title { font-weight: 800; }
+
+.layout-controls {
+  flex: 1;
+  min-width: 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.layout-controls label {
+  gap: 6px;
+  font-size: 12.5px;
+}
+
+.layout-controls output {
+  color: var(--text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.layout-controls input[type="range"] {
+  width: 100%;
+  accent-color: var(--silver);
+  padding: 0;
+  background: transparent;
+  border: none;
+}
+
+/* ---- provider choice cards ---- */
+.radio-card {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  min-width: 240px;
+  color: var(--text);
+  transition: border-color .12s ease, background .12s ease;
+}
+
+.radio-card:hover { border-color: var(--line-strong); background: var(--surface-2); }
+
+.radio-card:has(input:checked) {
+  border-color: var(--silver);
+  background: var(--surface-3);
+}
+
+.radio-card input { margin-top: 3px; accent-color: var(--silver); }
+
+#llm-key { width: 100%; font-family: ui-monospace, Menlo, Consolas, monospace; }
